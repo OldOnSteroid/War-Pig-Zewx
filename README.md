@@ -36,7 +36,6 @@ These are external prerequisites — install them separately into your scripts d
 - **Alfred the Butler** — town salvage / repair / restock. Used between activities by Arkham, WonderCity, Helltide, Reaper, HordeDev.
 - **Looteer v2** — loot pickup. Required by Arkham and WonderCity; recommended for everything else.
 - **Orbwalker** (with Clear toggled on + Block Orbwalker Movement enabled) — combat for HordeDev and a hard requirement for Infernal Hordes.
-- **D4Assistant** *(recommended for Reaper)* — fastest boss teleports. Reaper has a built-in fallback that clicks the world map if D4Assistant is unavailable.
 
 ## Quickstart
 
