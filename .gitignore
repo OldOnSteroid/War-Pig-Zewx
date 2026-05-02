@@ -1,0 +1,11 @@
+# Personal logs
+**/log.txt
+**/zewxlog.md
+
+# Per-user Claude Code settings
+**/.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
