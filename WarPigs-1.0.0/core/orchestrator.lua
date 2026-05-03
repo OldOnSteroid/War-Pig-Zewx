@@ -111,10 +111,12 @@ orchestrator.quest_plugin_map = {
         disable_when = in_town_disable_when,
     },
 
-    WarPlans_QST_Helltide_TorturedGifts = {
-        plugin       = 'HelltideRevampedPlugin',
-        disable_when = in_town_disable_when,  -- wait for HR's town-salvage trip
-    },
+    -- Helltide handoff: no disable_when. The quest disappearing means the
+    -- helltide event ended (or the bot left it), and there's no in-zone
+    -- wrap-up worth waiting for — HR can be cut immediately. The standard
+    -- TRANSITION_GAP_SECONDS (5s) gap still applies via last_disable_time
+    -- before the next plugin enables.
+    WarPlans_QST_Helltide_TorturedGifts = 'HelltideRevampedPlugin',
 
     WarPlans_QST_Undercity = {
         plugin       = 'WonderCityPlugin',
