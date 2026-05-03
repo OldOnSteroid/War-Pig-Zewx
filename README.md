@@ -82,6 +82,10 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 
 ## Changelog
 
+### 2026-05-03
+- **Reaper: external rotations are now strictly single-shot**. Fixes a bug seen in the wild where a stuck/non-despawning chest (butcher this season) let the altar re-arm up to 6× before WarPigs's 120 s force-disable kicked in. New `external_consumed` flag locks `consume_run` to one call per rotation; the altar task hard-rejects any further interaction once that fires; the material-inventory recheck (which would otherwise re-extend the run) is skipped entirely for external rotations.
+- **Reaper: 25 s "no chest still counts" window for external runs**. Some war plans now complete on the kill alone — no chest drops at all. After 25 s post-altar with no chest, the rotation force-completes so WarPigs's 60 s post-kill timer can start cleanly and the plan moves on. Inventory-driven (non-orchestrator) runs keep the original 60 s deadlock-retry path.
+
 ### 2026-05-02
 - **WarPigs orchestrator: transition sequencer**. Adds a 5 s settle gap between disabling the outgoing plugin and enabling the next one, plus a 120 s safety cap so a stuck activity can never block the orchestrator forever. Pit / Undercity share an in-town disable predicate (waits for `PLAYER_IN_TOWN_LEVEL_AREA`); Helltide cuts immediately when the quest ends. Boss runs use a Reaper kill tracker (snapshots `total_runs` at enable; defers disable for 60 s after the counter ticks).
 - **WarPigs orchestrator: enable hardened**. Wraps plugin `enable()` in `pcall` and trusts `status()` over the exit path — a partial enable (e.g. HR setting `main_toggle` then crashing on a missing `keybind_toggle`) no longer infinite-loops re-enabling. Self-disabled plugins (e.g. Reaper "Nothing to farm — Stopping") short-circuit, clearing deferrals so the next plan can start immediately.

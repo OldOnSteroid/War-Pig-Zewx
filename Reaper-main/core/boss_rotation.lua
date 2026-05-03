@@ -26,6 +26,11 @@ rotation.initialized = false
 -- ReaperPlugin.run_boss). build() becomes a no-op so the inventory-derived
 -- rotation does not overwrite the external request. Cleared on disable.
 rotation.external    = false
+-- Single-shot guard for external rotations. Set true the first time
+-- consume_run fires for an external rotation; subsequent calls (duplicate
+-- chest events, deadlock recovery, etc.) no-op so total_kills never
+-- double-counts and the altar can't re-arm.
+rotation.external_consumed = false
 
 local function add_runs(label, counts, run_type)
     local added = 0
@@ -106,6 +111,17 @@ function rotation.consume_run()
     local boss = rotation.current()
     if not boss then return end
 
+    -- External one-shot lockout: chest open + deadlock recovery can both end
+    -- up calling consume_run, and we MUST NOT double-count the kill (would
+    -- offset WarPigs's reaper_kill_disable_when timer) or leave any opening
+    -- for the altar to re-fire. First call wins; rest are no-ops.
+    if rotation.external and rotation.external_consumed then
+        return
+    end
+    if rotation.external then
+        rotation.external_consumed = true
+    end
+
     boss.runs_remaining       = boss.runs_remaining - 1
     tracker.total_kills       = tracker.total_kills + 1
     tracker.current_boss_kills = tracker.current_boss_kills + 1
@@ -116,7 +132,12 @@ function rotation.consume_run()
     if boss.runs_remaining <= 0 then
         -- Re-verify inventory before advancing: if materials are still present the
         -- in-script counter drifted and we should correct it rather than skip the boss.
-        if boss.run_type == "material" then
+        --
+        -- IMPORTANT: skip the material-correction reset for externally-injected
+        -- rotations (WarPigs etc.). External rotations are explicitly single-shot
+        -- (runs_remaining=1), and resetting the counter from inventory would loop
+        -- the altar interaction forever — the orchestrator only wanted ONE kill.
+        if boss.run_type == "material" and not rotation.external then
             local mats   = materials.scan()
             local actual = mats[boss.id] or 0
             if actual > 0 then
@@ -126,6 +147,11 @@ function rotation.consume_run()
                 boss.runs_remaining = actual
                 return
             end
+        end
+        if rotation.external then
+            console.print(string.format(
+                "[Reaper] %s external one-shot complete — locking out altar (rotation done).",
+                boss.label))
         end
         console.print(string.format("[Reaper] %s done – moving to next.", boss.label))
         rotation.current_idx       = rotation.current_idx + 1
@@ -163,9 +189,10 @@ function rotation.set_external(boss_id, run_type)
         runs_remaining = 1,
         run_type       = run_type,
     } }
-    rotation.current_idx = 1
-    rotation.initialized = true
-    rotation.external    = true
+    rotation.current_idx       = 1
+    rotation.initialized       = true
+    rotation.external          = true
+    rotation.external_consumed = false
     tracker.current_boss_kills = 0
 
     console.print(string.format("[Reaper] External rotation set: %s [%s]",
@@ -177,7 +204,8 @@ function rotation.clear_external()
     if rotation.external then
         console.print("[Reaper] Clearing external rotation flag.")
     end
-    rotation.external = false
+    rotation.external          = false
+    rotation.external_consumed = false
 end
 
 function rotation.advance()

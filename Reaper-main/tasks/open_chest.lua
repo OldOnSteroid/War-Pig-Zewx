@@ -285,7 +285,12 @@ function task.Execute()
 
             -- Re-verify actual inventory before declaring out of materials.
             -- Chest may have failed to despawn due to lag or a missed interact.
-            if boss and boss.run_type == "material" then
+            -- BUT: external (orchestrator-injected) rotations are explicit
+            -- one-shots — never extend the run from inventory, even if the
+            -- chest is misbehaving. Otherwise the altar can re-fire (seen
+            -- 2026-05-03: chest opened, didn't despawn, altar re-armed 6×
+            -- before WarPigs's MAX_DISABLE_DEFER force-disabled Reaper).
+            if boss and boss.run_type == "material" and not rotation.external then
                 local actual = materials.scan()[boss.id] or 0
                 if actual > 0 then
                     console.print(string.format(
