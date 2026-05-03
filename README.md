@@ -60,7 +60,7 @@ WarPigs maps each boss-lair War Plan quest to a Reaper boss id:
 | `WarPlans_QST_BossLair_Varshan` | varshan |
 | `WarPlans_QST_BossLair_PenitentKnight` | grigoire |
 | `WarPlans_QST_BossLair_S2VampireLord` | zir |
-| `WarPlans_QST_BossLair_MegaDemon` | beast |
+| `WarPlans_QST_BossLair_MegaDemon` / `_Beast` / `_BeastInIce` | beast |
 | `WarPlans_QST_BossLair_Urivar` | urivar |
 | `WarPlans_QST_BossLair_Butcher` | butcher |
 | `WarPlans_QST_BossLair_Belial` | belial |
@@ -85,6 +85,7 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 ### 2026-05-03
 - **Reaper: external rotations are now strictly single-shot**. Fixes a bug seen in the wild where a stuck/non-despawning chest (butcher this season) let the altar re-arm up to 6× before WarPigs's 120 s force-disable kicked in. New `external_consumed` flag locks `consume_run` to one call per rotation; the altar task hard-rejects any further interaction once that fires; the material-inventory recheck (which would otherwise re-extend the run) is skipped entirely for external rotations.
 - **Reaper: 25 s "no chest still counts" window for external runs**. Some war plans now complete on the kill alone — no chest drops at all. After 25 s post-altar with no chest, the rotation force-completes so WarPigs's 60 s post-kill timer can start cleanly and the plan moves on. Inventory-driven (non-orchestrator) runs keep the original 60 s deadlock-retry path.
+- **WarPigs: extra Beast-in-Ice quest aliases**. Map now lists `WarPlans_QST_BossLair_MegaDemon` (asset-name guess), `_Beast`, and `_BeastInIce` — whichever name Blizzard actually used will match. Use the WarPigs **Log ALL quests** option to confirm and trim the misses.
 
 ### 2026-05-02
 - **WarPigs orchestrator: transition sequencer**. Adds a 5 s settle gap between disabling the outgoing plugin and enabling the next one, plus a 120 s safety cap so a stuck activity can never block the orchestrator forever. Pit / Undercity share an in-town disable predicate (waits for `PLAYER_IN_TOWN_LEVEL_AREA`); Helltide cuts immediately when the quest ends. Boss runs use a Reaper kill tracker (snapshots `total_runs` at enable; defers disable for 60 s after the counter ticks).

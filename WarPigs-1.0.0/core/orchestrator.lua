@@ -199,7 +199,23 @@ orchestrator.quest_plugin_map = {
         enable = function(p) p.run_boss('zir') end,
         disable_when = reaper_kill_disable_when,
     },
-    WarPlans_QST_BossLair_MegaDemon = {      -- guess (beast in ice, asset name)
+    -- Beast in Ice: asset name is Boss_WT4_MegaDemon, but quests typically use
+    -- the display name (per Harby/PenitentKnight precedent). Listing multiple
+    -- aliases so we match whatever Blizzard chose. Multiple keys → same plugin
+    -- is supported (kept enabled while ANY matches). Confirm the real name by
+    -- enabling settings.log_all_quests and watching for "NEW QUEST: ..."
+    -- containing WarPlans_QST_BossLair_*; trim the misses afterward.
+    WarPlans_QST_BossLair_MegaDemon = {      -- asset-name guess
+        plugin = 'ReaperPlugin',
+        enable = function(p) p.run_boss('beast') end,
+        disable_when = reaper_kill_disable_when,
+    },
+    WarPlans_QST_BossLair_Beast = {          -- display-name guess
+        plugin = 'ReaperPlugin',
+        enable = function(p) p.run_boss('beast') end,
+        disable_when = reaper_kill_disable_when,
+    },
+    WarPlans_QST_BossLair_BeastInIce = {     -- display-name (full) guess
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('beast') end,
         disable_when = reaper_kill_disable_when,
