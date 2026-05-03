@@ -22,6 +22,7 @@ The reward turn-in step (`WarPlans_QST_TurnIn_Rewards`) is handled internally �
 | Plugin | Activity | Notes |
 |---|---|---|
 | **WarPigs-1.0.0** | Master orchestrator | The brain. Watches quests, enables/disables sub-plugins. Always required. |
+| **AlfredTheButler-main** | Town services | Stash / salvage / sell / repair / restock between activities. Now ships with a **right-click stash fallback** for cases where the standard `move_item_to_stash` API stops making progress. |
 | **ArkhamAsylum-1.0.6** | The Pit | Pit runner. Requires Batmobile + Alfred + Looteer v2. |
 | **Batmobile-1.0.12** | (shared library) | Pathfinder/explorer used by ArkhamAsylum and WonderCity. Does nothing on its own. |
 | **HelltideRevamped-0.4** | Helltides | Maiden routes, chests, ore/herb, shrines, goblins, chaos rifts. |
@@ -33,7 +34,6 @@ The reward turn-in step (`WarPlans_QST_TurnIn_Rewards`) is handled internally �
 
 These are external prerequisites — install them separately into your scripts directory:
 
-- **Alfred the Butler** — town salvage / repair / restock. Used between activities by Arkham, WonderCity, Helltide, Reaper, HordeDev.
 - **Looteer v2** — loot pickup. Required by Arkham and WonderCity; recommended for everything else.
 - **Orbwalker** (with Clear toggled on + Block Orbwalker Movement enabled) — combat for HordeDev and a hard requirement for Infernal Hordes.
 

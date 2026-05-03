@@ -1,0 +1,133 @@
+# Alfred the butler
+#### V1.7.9
+## DISCLAIMER
+Alfred is a plugin that CAN read and write files. In this repo, I have specifically only write to data/export folder and only read from data/import folder. It will ONLY read and write files if you press the import/export function on the menu. This is an open-source repo and you are free to check the code on what files alfred will read/write.
+
+Alfred also does near-instant sell and near-instant salvage, it will likely sell/salvage before you even see the inventory page open. It will still obey your filter settings (both GA count and affix/unique/mythic filters)
+
+## Description
+Alfred is your personal butler in Skov_Temis. He is capable of stashing, salvaging and selling items based on your settings. He is also capable of restock boss summon materials as well as infernal horde compasses. Additionally, he will also display status of your inventory on top left of your screen and you can see how many items alfred will stash/keep, salvage or sell as well as count/max boss summon materials and infernal horde compasses that you instruct alfred to restock.
+
+there are 4 trigger conditions that can get alfred to do tasks:
+- called by an external plugin
+- inventory (or obol) is full and you went back to Skov_Temis
+- a manual trigger via keybind
+- restock mode is set to active and you have less than the hardcoded minimum (for boss item, it is set to the minimum required to summon boss, for compass it is 1)
+
+For aspect/unique/mythic/affix filters, if you are using a build guide from mobalytics, here is a tool made by RadicalDadical55 that can create a proper import json for you to use: https://github.com/RadDude42/Build-Scraper
+
+## Configurations
+### general
+- Enable checkbox -- to enable alfred plugin
+  
+### General settings
+- Keybinds
+  - toggle keybind -- for quick enable/disable
+  - dump tracker info -- debug usage
+  - manual trigger -- make alfred do task now (will teleport to Skov_Temis if not there)
+- explorer path angle (lower is better)
+- max inventory items -- No. of items to count as inventory full. usefull for bossing when you dont pick all items up
+- failed action -- In event that alfred is unable to complete all task, alfred can stand there and dump tracker info to log, or alfred can just force retry and may be stuck in a loop (but atleast inactivity timer wont kick in)
+- skip stashing cache -- dont stash caches
+
+### Display settings
+- Draw Status -- to enable the status on top left of screen
+- Draw Keep Items -- draw blue box around items that is set to keep in inventory
+- Draw Sell Items -- draw pink box around items that is set to sell in inventory
+- Draw Salvage Items -- draw orange box around items that is set to salvage in inventory
+- Various box sizing and offset settings to adjust depending on screen size similar to affix filter
+
+### Non-ancestral
+select what to do with non-ancestral items by types and marked as junk
+
+### Ancestral
+- Drop down to select what to do with items that do not meet the threshold by types and marked as junk
+- Greater affix threshold to keep for mythic, uniques and legendaries. Setting all of them to 1 will tell alfred to keep/stash all items with 1 greater affix or more (basically keep/stash everything)
+- Keep max aspect checkbox -- if checked, will ignore the GA threshold and keep the item if the aspect roll is max
+- use aspect filter -- if checked, will use aspect filters for max aspect instead of all
+- use unique/mythic filter -- enable more specific filters by selecting which unique/mythic u want to keep
+- use affix filter -- enable more specific filters via affix for legendaries
+- Additional slider for matching affix threshold
+- Both GA threshold and min affix threshold must be met
+- export/import functionality -- you can use this to export/import affix filter and unique/mythic configuration. There is a preset for spiritborn for most common spiritborn build items
+#### Aspect
+- search and add aspects that you want to keep if they are max roll
+#### Unique/Mythic
+- search and add uniques/mythics that you want to keep
+#### Helm/Chest/Gloves/Pants/Boots/Amulet/Ring/Weapon/Offhand
+- search and add affixes that you want to keep
+- you can search by name, description or id
+
+### Socketables
+- stash socketables
+  - never -- never stash socketables
+  - when full -- only stash socketables when socketables inventory is full
+  - always -- always stash socketables whenever alfred is triggered
+
+### Consumables
+- stash consumeables
+  - never -- never stash boss materials
+  - when full -- only stash boss materials when boss materials inventory is full
+  - always -- always stash boss materials whenever alfred is triggered
+- sliders for maximum amount of item to restock up to
+    - set to 0 if u do not want to restock that item
+
+### Dungeon Keys
+- stash dungeon keys
+  - never -- never stash compasses and tributes
+  - when full -- only stash compasses and tributes when compasses and tributes inventory is full
+  - always -- always stash compasses and tributes whenever alfred is triggered
+- stash favourited sigils -- if you have any favourited sigils, alfred will stash it whenever stash dungeon keys is triggered
+- salvage non-favourited sigils -- if enabled, alfred will salvage all non-favourited sigils at blacksmith
+- sliders for maximum amount of item to restock up to
+    - set to 0 if u do not want to restock that item
+
+### Gambling Settings
+- Enable gambling -- toggle on/off for alfred to gamble
+- Obols threshold -- amount of obols before starting gambling
+- Language -- set to your client language so that it can match the categoies.
+- For English and Chinese (simplified)
+  - drop down to select gambling category
+- For Other
+  - text input to accept the gambking category
+
+## For devs
+Alfred exposes an external collection of functions via global variable `PLUGIN_alfred_the_butler`.
+Also in the task folder, there is an `external-template.lua` as a sample on how to call alfred from other plugins.
+
+## Known issues
+- some aspects are giving false positive, mainly those that have multiple data (e.g. frost stride). for now, alfred is treating them as real max aspect to not accidentally sell/salvage a max one
+
+## Changelog
+### V1.7.9
+- added matched_affix to export_inventory_info for debugging
+
+### V1.7.8
+- fix reset not using batmobile
+
+### V1.7.7
+- fix stashing sigils bug
+
+### V1.7.6
+- fix teleport bug
+
+### V1.7.5
+- added stash favourited sigils option (under dungeon keys)
+- added salvage non-favourited sigils option (under dungeon keys)
+- removed evade option
+- added safeguard for return teleport when portal doesnt exist to stop alfred from keep trying to find portal
+- "possible pathing improvement"
+
+### V1.7.4
+- revert temp fix for drawing (api is fixed)
+- fix stashing key sometimes not working properly
+- updated tribute list for S11
+- updated ancestral legendary GA settings and min matching affix to 4
+- updated gamble -> sell/salvage/stash logic. Now it will perform a full sell/salvage/stash before resuming gamble
+
+
+## Credits
+- Letrico - general help, bouncing ideas, my faq XD
+- Zewx - explorerlite is written by Zewx in the piteer plugin and is being used in alfred
+- Lanvi - pre-release general testing and feedback
+- Pinguu - drawing boxes based on filters
