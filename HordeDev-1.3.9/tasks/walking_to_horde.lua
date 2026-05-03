@@ -38,6 +38,56 @@ local WAYPOINT_LOOKAHEAD   = 10  -- skip 10 waypoints (~20m ahead)
 local WAYPOINT_ARRIVAL_DIST = 8  -- advance when within 8m of current target
 local last_target_wi = nil       -- track which waypoint was last sent to Batmobile
 
+-- Stuck watchdog: if the player hasn't moved meaningfully for STUCK_WINDOW_S
+-- while this task is the active executor, re-teleport to Library waypoint
+-- and reset state. Seen in the wild: Batmobile reports paused=true, custom=
+-- false, target=nil, trapped=true with no escape attempts firing — task spins
+-- "Executing Walking to Horde task" forever with no movement.
+local STUCK_THRESHOLD_M    = 1.5
+local STUCK_WINDOW_S       = 12.0
+local RECOVERY_COOLDOWN_S  = 20.0
+local last_progress_pos    = nil
+local last_progress_time   = 0
+local last_recovery_time   = -999
+
+local function reset_progress_tracker()
+    last_progress_pos  = nil
+    last_progress_time = 0
+end
+
+local function watchdog_tick(player_pos)
+    if not player_pos then return false end
+    local now = get_time_since_inject()
+    if last_progress_pos == nil then
+        last_progress_pos  = player_pos
+        last_progress_time = now
+        return false
+    end
+    local dist = player_pos:dist_to(last_progress_pos)
+    if dist > STUCK_THRESHOLD_M then
+        last_progress_pos  = player_pos
+        last_progress_time = now
+        return false
+    end
+    if now - last_progress_time < STUCK_WINDOW_S then return false end
+    if now - last_recovery_time < RECOVERY_COOLDOWN_S then return false end
+    last_recovery_time = now
+    console.print(string.format(
+        "[walking_to_horde] stuck %.1fs at (%.1f,%.1f) — re-teleporting to Library and resetting state",
+        now - last_progress_time, player_pos:x(), player_pos:y()))
+    if BatmobilePlugin then
+        BatmobilePlugin.clear_target(plugin_label)
+        BatmobilePlugin.clear_traversal_blacklist(plugin_label)
+        BatmobilePlugin.clear_giving_up(plugin_label)
+        BatmobilePlugin.reset(plugin_label)
+    end
+    -- Force Execute to re-enter the teleport branch on the next tick.
+    tracker.teleported_from_town = false
+    last_target_wi               = nil
+    reset_progress_tracker()
+    return true
+end
+
 local walking_to_horde_task = {
     name = "Walking to Horde",
     last_teleport_time = 0,
@@ -80,6 +130,17 @@ function walking_to_horde_task.Execute()
     console.print("Executing Walking to Horde task")
 
     local current_time = get_time_since_inject()
+    local player_pos = get_player_position()
+
+    -- Stuck recovery: only arms once the post-teleport cooldown has elapsed
+    -- (during cooldown the player is supposed to be standing still).
+    if tracker.teleported_from_town and
+        (current_time - walking_to_horde_task.last_teleport_time) >= walking_to_horde_task.teleport_wait_time
+    then
+        if watchdog_tick(player_pos) then return false end
+    else
+        reset_progress_tracker()
+    end
 
     if utils.get_horde_gate() and utils.distance_to(utils.get_horde_gate()) < 25 then
         move_to(utils.get_horde_gate():get_position())
@@ -92,6 +153,7 @@ function walking_to_horde_task.Execute()
         walking_to_horde_task.last_teleport_time = current_time
         walking_to_horde_task.current_waypoint_index = 1
         last_target_wi = nil
+        reset_progress_tracker()
 
         console.print("Teleported to Library waypoint, waiting for " .. walking_to_horde_task.teleport_wait_time .. " seconds")
     elseif current_time - walking_to_horde_task.last_teleport_time >= walking_to_horde_task.teleport_wait_time then
@@ -126,6 +188,7 @@ function walking_to_horde_task.Execute()
             walking_to_horde_task.current_waypoint_index = 1
             walking_to_horde_task.arrived_destination = true
             last_target_wi = nil
+            reset_progress_tracker()
             console.print("Walking to Horde task completed")
             return true
         end

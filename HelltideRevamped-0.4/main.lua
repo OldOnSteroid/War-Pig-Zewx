@@ -31,13 +31,17 @@ end
 HelltideRevampedPlugin = {
     enable = function ()
         console.print('HELLTIDE REVAMPED ACTIVATING')
-        gui.elements.main_toggle:set(true)
-        gui.elements.keybind_toggle:set(true)
+        if gui.elements.main_toggle then gui.elements.main_toggle:set(true) end
+        -- HR doesn't currently expose a keybind_toggle GUI element, but guard
+        -- the access so an external orchestrator (WarPigs) doesn't crash on
+        -- repeat enables when the symbol is absent.
+        if gui.elements.keybind_toggle then gui.elements.keybind_toggle:set(true) end
         settings:update_settings()
     end,
     disable = function ()
         console.print('HELLTIDE REVAMPED DEACTIVATING')
-        gui.elements.main_toggle:set(false)
+        if gui.elements.main_toggle then gui.elements.main_toggle:set(false) end
+        if gui.elements.keybind_toggle then gui.elements.keybind_toggle:set(false) end
         settings:update_settings()
     end,
     status = function ()

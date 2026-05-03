@@ -2,6 +2,78 @@ local settings = require 'core.settings'
 
 local orchestrator = {}
 
+-- ── transition sequencer ────────────────────────────────────────────────────
+-- Goal: never have two activity plugins running at once and never start the
+-- next plugin while the previous one is still wrapping up. Sequence per
+-- handoff:
+--   (1) Wait for outgoing plugin's disable_when() to return true
+--       (e.g. Pit/WonderCity → back in town; Reaper → boss kill + 60s).
+--   (2) Disable outgoing plugin.
+--   (3) Wait TRANSITION_GAP_SECONDS for game state to settle.
+--   (4) Enable incoming plugin.
+-- MAX_DISABLE_DEFER_SECONDS is a safety cap so a stuck activity can't block
+-- the orchestrator forever.
+local TRANSITION_GAP_SECONDS    = 5
+local MAX_DISABLE_DEFER_SECONDS = 120
+
+-- Predicate: is the player in a town level area? Reused by Pit / WonderCity /
+-- Helltide entries since "back in town" is the natural settle point for all
+-- three. Returns true on any failure to read the attribute (don't block on
+-- API quirks — MAX_DISABLE_DEFER_SECONDS is the real safety net).
+local function in_town_disable_when()
+    local lp = get_local_player()
+    if not lp then return false end
+    if not _G.attributes or _G.attributes.PLAYER_IN_TOWN_LEVEL_AREA == nil then
+        return true
+    end
+    local ok, val = pcall(function()
+        return lp:get_attribute(attributes.PLAYER_IN_TOWN_LEVEL_AREA) == 1
+    end)
+    return ok and val == true
+end
+
+-- Reaper kill tracker. Reaper only exposes a monotonically-increasing
+-- total_runs counter, so we snapshot it at enable time and treat any increase
+-- after that as "boss died this run". The 60s post-kill defer covers loot
+-- pickup, crafting-mat opening, and travel back to town.
+local reaper_kill = { baseline = nil, kill_time = nil }
+
+local function reaper_kill_tick()
+    local p = _G.ReaperPlugin
+    if not p or type(p.status) ~= 'function' then return end
+    local ok, s = pcall(p.status)
+    if not ok or type(s) ~= 'table' then return end
+    local total = s.total_runs or 0
+    if reaper_kill.baseline == nil then
+        reaper_kill.baseline = total
+        return
+    end
+    if total > reaper_kill.baseline then
+        reaper_kill.kill_time = get_time_since_inject()
+        reaper_kill.baseline  = total
+    end
+end
+
+local function reset_reaper_kill_baseline()
+    local p = _G.ReaperPlugin
+    if p and type(p.status) == 'function' then
+        local ok, s = pcall(p.status)
+        if ok and type(s) == 'table' then
+            reaper_kill.baseline = s.total_runs or 0
+        else
+            reaper_kill.baseline = 0
+        end
+    else
+        reaper_kill.baseline = 0
+    end
+    reaper_kill.kill_time = nil
+end
+
+local function reaper_kill_disable_when()
+    if reaper_kill.kill_time == nil then return false end
+    return get_time_since_inject() - reaper_kill.kill_time >= 60
+end
+
 -- Map keys are matched as PLAIN SUBSTRINGS against the names of active
 -- quests. Only quests whose name contains "WarPlans_QST" are eligible —
 -- everything else (Bounty_*, story quests, etc.) is ignored. Multiple keys
@@ -33,22 +105,21 @@ local orchestrator = {}
 orchestrator.quest_plugin_map = {
     WarPlans_QST_ThePit = {
         plugin = 'ArkhamAsylumPlugin',
-        -- Quest can vanish while still inside the pit (post-quest reward
-        -- phase). Arkham needs to wrap up the glyphstone interaction and
-        -- teleport back to town first. Defer disable until we're no longer
-        -- in the PIT_Subzone.
-        disable_when = function()
-            local world = get_current_world()
-            if not world then return false end
-            local ok, zone = pcall(function() return world:get_current_zone_name() end)
-            if not ok or type(zone) ~= 'string' then return false end
-            return zone ~= 'PIT_Subzone'
-        end,
+        -- Pit quest can vanish while still inside the pit (post-quest reward
+        -- phase). Wait for the player to fully return to town before letting
+        -- the next plugin take over.
+        disable_when = in_town_disable_when,
     },
 
-    WarPlans_QST_Helltide_TorturedGifts = 'HelltideRevampedPlugin',
+    WarPlans_QST_Helltide_TorturedGifts = {
+        plugin       = 'HelltideRevampedPlugin',
+        disable_when = in_town_disable_when,  -- wait for HR's town-salvage trip
+    },
 
-    WarPlans_QST_Undercity              = 'WonderCityPlugin',
+    WarPlans_QST_Undercity = {
+        plugin       = 'WonderCityPlugin',
+        disable_when = in_town_disable_when,  -- wait for the Kurast/Temis return
+    },
 
     -- Confirmed seen in logs as WarPlans_QST_InfernalHordes_BSK; substring
     -- match covers any tier/variant suffix.
@@ -99,42 +170,52 @@ orchestrator.quest_plugin_map = {
     WarPlans_QST_BossLair_Andariel = {  -- CONFIRMED
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('andariel') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_Harby = {     -- CONFIRMED (harbinger)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('harbinger') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_Duriel = {    -- guess
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('duriel') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_Varshan = {   -- guess
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('varshan') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_PenitentKnight = {  -- CONFIRMED (grigoire)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('grigoire') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_S2VampireLord = {  -- guess (zir, asset name)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('zir') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_MegaDemon = {      -- guess (beast in ice, asset name)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('beast') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_Urivar = {    -- guess
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('urivar') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_Butcher = {   -- guess
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('butcher') end,
+        disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_Belial = {    -- guess
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('belial') end,
+        disable_when = reaper_kill_disable_when,
     },
 }
 
@@ -152,6 +233,9 @@ local owned          = {}  -- plugin_name -> true (currently enabled by us)
 local last_wanted    = {}  -- plugin_name -> true (was-wanted on previous tick)
 local last_matches   = {}  -- pattern -> true (for verbose log only)
 local pending_disable = {} -- plugin_name -> true (disable deferred by predicate)
+local pending_disable_since = {}  -- plugin_name -> time when deferral started (for MAX_DISABLE_DEFER_SECONDS)
+local last_disable_time     = {}  -- plugin_name -> time the disable actually fired (for TRANSITION_GAP_SECONDS gate)
+local enable_blocked        = {}  -- plugin_name -> last gate-reason logged (suppresses repeat logs)
 local was_off        = {}  -- plugin_name -> true (we believe it is currently off; suppresses repeated logs)
 
 local function log(msg)
@@ -176,22 +260,59 @@ local function get_active_quest_names()
     return names
 end
 
+-- Best-effort check: is the plugin currently reporting itself enabled?
+-- Returns true if a status surface says enabled=true. Returns false if no
+-- status is exposed — in which case we fall back to our own owned[] table.
+-- (Defined ABOVE plugin_enable so the resilient-enable code can reference it
+--  — Lua locals aren't hoisted, so a forward reference would resolve to a
+--  global nil at call time.)
+local function is_plugin_on(plugin_name)
+    local p = _G[plugin_name]
+    if not p then return false end
+    local status_fn = (type(p.status) == 'function' and p.status)
+                   or (type(p.get_status) == 'function' and p.get_status)
+                   or nil
+    if status_fn then
+        local ok, s = pcall(status_fn)
+        if ok and type(s) == 'table' then return s.enabled == true end
+    end
+    return owned[plugin_name] == true
+end
+
 local function plugin_enable(entry, reason)
     local p = _G[entry.plugin]
     if not p then
         log('cannot enable ' .. entry.plugin .. ' — plugin not loaded')
         return
     end
+    -- Wrap enable() in pcall: a misbehaving plugin (e.g. HR.enable referencing
+    -- a missing GUI element) used to crash the orchestrator and trigger an
+    -- infinite enable loop because owned[] never got set, so the edge check
+    -- fired again next tick.
+    local ok, err
     if entry.enable then
-        entry.enable(p)
+        ok, err = pcall(entry.enable, p)
     elseif type(p.enable) == 'function' then
-        p.enable()
+        ok, err = pcall(p.enable)
     else
         log('cannot enable ' .. entry.plugin .. ' — no enable function')
         return
     end
-    owned[entry.plugin] = true
-    log('enabled ' .. entry.plugin .. ' (' .. (reason or '?') .. ')')
+    if not ok then
+        log('enable() of ' .. entry.plugin .. ' threw: ' .. tostring(err))
+    end
+    -- Trust the plugin's status() over enable()'s exit path — partial enables
+    -- (HR sets main_toggle, then crashes on missing keybind_toggle, but the
+    -- plugin IS active because main_toggle is what status() reports) should
+    -- count as enabled. Otherwise we'd keep retrying and crashing forever.
+    if is_plugin_on(entry.plugin) then
+        owned[entry.plugin] = true
+        enable_blocked[entry.plugin] = nil
+        if entry.plugin == 'ReaperPlugin' then reset_reaper_kill_baseline() end
+        log('enabled ' .. entry.plugin .. ' (' .. (reason or '?') .. ')')
+    else
+        log('enable of ' .. entry.plugin .. ' did not result in enabled status — will retry next tick')
+    end
 end
 
 local function plugin_disable(entry)
@@ -206,6 +327,7 @@ local function plugin_disable(entry)
         end
     end
     owned[entry.plugin] = nil
+    last_disable_time[entry.plugin] = get_time_since_inject()
 end
 
 -- Quest-dump mode: record every quest name+id we have ever seen and print
@@ -258,26 +380,16 @@ local function get_managed_plugins()
     return set
 end
 
--- Best-effort check: is the plugin currently reporting itself enabled?
--- Returns true if a status surface says enabled=true. Returns false if no
--- status is exposed — in which case we fall back to our own owned[] table.
-local function is_plugin_on(plugin_name)
-    local p = _G[plugin_name]
-    if not p then return false end
-    local status_fn = (type(p.status) == 'function' and p.status)
-                   or (type(p.get_status) == 'function' and p.get_status)
-                   or nil
-    if status_fn then
-        local ok, s = pcall(status_fn)
-        if ok and type(s) == 'table' then return s.enabled == true end
-    end
-    return owned[plugin_name] == true
-end
-
 function orchestrator.tick()
     if settings.log_all_quests then dump_all_quests() end
 
+    -- Always sample Reaper kill state, even when no boss quest is currently
+    -- matched, so reaper_kill_disable_when() has accurate data the moment a
+    -- boss quest disappears.
+    reaper_kill_tick()
+
     local active_names = get_active_quest_names()
+    local now          = get_time_since_inject()
 
     -- Compute which plugins should be enabled this tick, and drive any
     -- task entries directly. Matching is plain substring (string.find
@@ -310,37 +422,63 @@ function orchestrator.tick()
         end
     end
 
-    -- Edge: enable plugins newly wanted (per-plugin, so multiple matching
-    -- patterns don't double-enable).
-    for plugin_name, entry in pairs(wants) do
-        if not last_wanted[plugin_name] then
-            plugin_enable(entry, matched_reason[plugin_name])
-        end
-    end
-
-    -- State-based disable: every managed plugin without a matching trigger
-    -- must be off. This catches plugins that were enabled outside WarPigs
-    -- (manual toggle, persisted across script reload, prior session). Honors
-    -- disable_when so post-quest wrap-up windows still apply.
+    -- ── DISABLE PHASE (runs first) ──────────────────────────────────────────
+    -- Every managed plugin without a matching trigger must be off. Honors
+    -- disable_when so post-quest wrap-up windows apply. After the deferral
+    -- exceeds MAX_DISABLE_DEFER_SECONDS the disable is forced to keep a stuck
+    -- activity from blocking the orchestrator forever.
     local managed = get_managed_plugins()
     for plugin_name, entry in pairs(managed) do
         if not wants[plugin_name] then
-            if entry.disable_when and not entry.disable_when() then
-                if not pending_disable[plugin_name] then
-                    log('deferring disable of ' .. plugin_name ..
-                        ' — disable_when() not yet satisfied')
-                    pending_disable[plugin_name] = true
+            -- Short-circuit: if the plugin is already off (self-disabled, e.g.
+            -- Reaper "Nothing to farm — Stopping", or never on), there's no
+            -- handoff to sequence. Clear deferral state and skip the gap so
+            -- the next plugin can enable immediately. Without this guard,
+            -- self-disabled plugins with strict disable_when predicates
+            -- (Reaper kill+60s) would block enables forever.
+            if not is_plugin_on(plugin_name) then
+                if pending_disable[plugin_name] then
+                    log('clearing stale pending_disable on ' .. plugin_name ..
+                        ' — plugin is no longer reporting enabled')
                 end
-                wants[plugin_name] = entry  -- keep wanted; prevents edge re-trigger
+                -- If we believed we owned this plugin (= it was running under
+                -- our enable), treat the self-disable as a real handoff and
+                -- apply the transition gap. Plugins that were never owned by
+                -- us (stale state from a prior session, manual toggle) skip
+                -- the gap so cold-start cleanup is fast.
+                if owned[plugin_name] then
+                    log('detected self-disable of ' .. plugin_name ..
+                        ' — applying ' .. TRANSITION_GAP_SECONDS .. 's transition gap')
+                    last_disable_time[plugin_name] = now
+                end
+                pending_disable[plugin_name]       = nil
+                pending_disable_since[plugin_name] = nil
+                owned[plugin_name]                 = nil
+                if not was_off[plugin_name] then was_off[plugin_name] = true end
             else
-                pending_disable[plugin_name] = nil
-                if is_plugin_on(plugin_name) then
+                local force = false
+                if pending_disable[plugin_name] and pending_disable_since[plugin_name]
+                    and now - pending_disable_since[plugin_name] >= MAX_DISABLE_DEFER_SECONDS
+                then
+                    log(string.format('forcing disable of %s — exceeded MAX_DISABLE_DEFER_SECONDS (%ds)',
+                        plugin_name, MAX_DISABLE_DEFER_SECONDS))
+                    force = true
+                end
+                if not force and entry.disable_when and not entry.disable_when() then
+                    if not pending_disable[plugin_name] then
+                        log('deferring disable of ' .. plugin_name ..
+                            ' — disable_when() not yet satisfied')
+                        pending_disable[plugin_name]       = true
+                        pending_disable_since[plugin_name] = now
+                    end
+                    -- Keep this plugin "wanted" (still owned by us) so the enable
+                    -- phase doesn't try to re-enable it during the deferral.
+                    wants[plugin_name] = entry
+                else
+                    pending_disable[plugin_name]       = nil
+                    pending_disable_since[plugin_name] = nil
                     plugin_disable(entry)
                     was_off[plugin_name] = true
-                else
-                    -- Already off. Clear stale ownership without logging.
-                    owned[plugin_name] = nil
-                    if not was_off[plugin_name] then was_off[plugin_name] = true end
                 end
             end
         else
@@ -348,8 +486,50 @@ function orchestrator.tick()
         end
     end
 
-    last_wanted  = {}
-    for k in pairs(wants) do last_wanted[k] = true end
+    -- ── ENABLE GATE ─────────────────────────────────────────────────────────
+    -- Don't start the next plugin while:
+    --   (a) any plugin's disable is still deferred (outgoing not finished), or
+    --   (b) we just disabled something within TRANSITION_GAP_SECONDS.
+    -- This is the actual handoff sequencer — pairs with disable_when to give
+    -- the game state a clean break between activities.
+    local gate_reason = nil
+    for p in pairs(pending_disable) do
+        gate_reason = 'pending disable: ' .. p
+        break
+    end
+    if not gate_reason then
+        for p, t in pairs(last_disable_time) do
+            local age = now - t
+            if age < TRANSITION_GAP_SECONDS then
+                gate_reason = string.format('post-disable cooldown: %s (%.1fs left)',
+                    p, TRANSITION_GAP_SECONDS - age)
+                break
+            end
+        end
+    end
+
+    -- ── ENABLE PHASE ────────────────────────────────────────────────────────
+    -- Edge-trigger: enable plugins newly wanted, unless gated.
+    for plugin_name, entry in pairs(wants) do
+        if not last_wanted[plugin_name] and not owned[plugin_name] then
+            if gate_reason then
+                if enable_blocked[plugin_name] ~= gate_reason then
+                    log('deferring enable of ' .. plugin_name .. ' — ' .. gate_reason)
+                    enable_blocked[plugin_name] = gate_reason
+                end
+            else
+                plugin_enable(entry, matched_reason[plugin_name])
+            end
+        end
+    end
+
+    -- last_wanted tracks "this plugin was actually owned at end of last tick".
+    -- Plugins that were gated out of enabling must NOT be marked wanted, so
+    -- the next tick's edge check fires the enable once the gate clears.
+    last_wanted = {}
+    for plugin_name in pairs(wants) do
+        if owned[plugin_name] then last_wanted[plugin_name] = true end
+    end
     last_matches = matches
 end
 
@@ -359,9 +539,12 @@ function orchestrator.release_all()
     for plugin_name in pairs(owned) do
         plugin_disable(find_entry_for_plugin(plugin_name))
     end
-    last_wanted     = {}
-    last_matches    = {}
-    pending_disable = {}
+    last_wanted           = {}
+    last_matches          = {}
+    pending_disable       = {}
+    pending_disable_since = {}
+    last_disable_time     = {}
+    enable_blocked        = {}
 end
 
 function orchestrator.get_status_line()
