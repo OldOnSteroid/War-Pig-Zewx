@@ -12,7 +12,12 @@ local main_pulse = function()
     last_tick = get_time_since_inject()
     settings:update_settings()
 
-    if not settings.enabled then
+    -- Treat the keybind as a gate stacked on top of the main toggle: if
+    -- keybind mode is on but the key isn't held/toggled, behave exactly like
+    -- the main toggle being off (release any plugins WarPigs has paused so
+    -- they resume autonomously).
+    local active = settings.enabled and settings.get_keybind_state()
+    if not active then
         if was_enabled then orchestrator.release_all() end
         was_enabled = false
         return
@@ -24,7 +29,7 @@ local main_pulse = function()
 end
 
 local render_pulse = function()
-    if not settings.enabled then return end
+    if not (settings.enabled and settings.get_keybind_state()) then return end
     local msg = orchestrator.get_status_line()
     if not msg then return end
     local x_pos = get_screen_width() / 2 - (#msg * 5.5)

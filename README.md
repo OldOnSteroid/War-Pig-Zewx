@@ -59,7 +59,7 @@ WarPigs maps each boss-lair War Plan quest to a Reaper boss id:
 | `WarPlans_QST_BossLair_Duriel` | duriel |
 | `WarPlans_QST_BossLair_Varshan` | varshan |
 | `WarPlans_QST_BossLair_PenitentKnight` | grigoire |
-| `WarPlans_QST_BossLair_S2VampireLord` | zir |
+| `WarPlans_QST_BossLair_Zir` | zir |
 | `WarPlans_QST_BossLair_MegaDemon` / `_Beast` / `_BeastInIce` | beast |
 | `WarPlans_QST_BossLair_Urivar` | urivar |
 | `WarPlans_QST_BossLair_Butcher` | butcher |
@@ -69,7 +69,9 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 
 ## GUI options (WarPigs)
 
-- **Enable** — master toggle. Off = no quest watching, all managed plugins forced off.
+- **Enable** — master toggle. Off = no quest watching, all managed plugins forced off. Defaults to off on first load (don't auto-activate before you've configured anything).
+- **Use keybind** — show the keybind row below. Off = the master toggle is the only gate.
+- **Toggle Keybind** — when **Use keybind** is on, this hotkey gates WarPigs on top of the master toggle (key off / not toggled = same as Enable being off, releases all managed plugins). Mirrors HordeDev's keybind pattern.
 - **Verbose logs** — print quest match/unmatch diffs to console.
 - **Log ALL quests** — print every newly-seen quest name + id to console. Use this when adding a new activity or fixing a wrong boss-lair guess.
 
@@ -83,6 +85,8 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 ## Changelog
 
 ### 2026-05-04
+- **WarPigs: keybind toggle + safer default**. New `Use keybind` checkbox + `Toggle Keybind` row gates WarPigs on/off via a hotkey on top of the master toggle (mirrors HordeDev's pattern). When the keybind is unset/untoggled WarPigs acts as if disabled — managed plugins are released and run autonomously again. The master `Enable` checkbox now defaults to **off** so a fresh load doesn't immediately seize control of every plugin in the suite before you've configured it.
+- **WarPigs: Zir quest name confirmed**. `WarPlans_QST_BossLair_Zir` is the real quest name (id=2317384, captured 2026-05-03). Replaces the `_S2VampireLord` asset-name guess in the orchestrator map and README boss-lair table.
 - **ArkhamAsylum: dedicated boss task + glyphstone anchor**. Pit guardian now has its own `kill_boss` task (higher priority than portal / explore_pit / kill_monster) so trash can't pull the bot off the boss. Boss position is remembered across player death — after revive the bot pathfinds back without exploring or chasing trash. After the kill, an anchor is set on the death position (then snapped onto the glyphstone when it spawns) and `explore_pit` holds within 6 m of it indefinitely instead of relying on the old 10 s fixed freeze, so a slow-spawning glyphstone can't cause a wander-off.
 - **HordeDev: Exit mode toggle (Reset / Teleport)**. New GUI option. Teleport mode skips the boss-room walk and the 5 s wait — straight TP to the Library waypoint after the run.
 - **HordeDev: graded stuck recovery in `walking_to_horde`**. Replaces the single 12 s "re-teleport to Library" watchdog with three escalating stages: 4 s nudge (re-snap to nearest waypoint, force fresh Batmobile target with smaller lookahead) → 8 s micro (bypass Batmobile, drive per-waypoint with the explorer fallback) → 12 s tele (re-teleport to Library, existing behavior). 20 s recovery cooldown so it can't thrash.

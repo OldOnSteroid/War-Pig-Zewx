@@ -13,7 +13,10 @@ gui.plugin_version = plugin_version
 
 gui.elements = {
     main_tree     = tree_node:new(0),
-    main_toggle   = create_checkbox(true, 'main_toggle'),
+    main_toggle   = create_checkbox(false, 'main_toggle'),
+    use_keybind   = create_checkbox(false, 'use_keybind'),
+    -- 0x0A is the harness convention for "no key bound yet" — same default as HordeDev.
+    keybind_toggle= keybind:new(0x0A, true, get_hash(plugin_label .. '_keybind_toggle')),
     verbose_logs  = create_checkbox(false, 'verbose_logs'),
     log_all_quests= create_checkbox(false, 'log_all_quests'),
 }
@@ -33,6 +36,10 @@ gui.render = function()
         end
     end
     gui.elements.main_toggle:render('Enable', 'Watch active quests and toggle managed plugins')
+    gui.elements.use_keybind:render('Use keybind', 'Quick on/off toggle via a hotkey')
+    if gui.elements.use_keybind:get() then
+        gui.elements.keybind_toggle:render('Toggle Keybind', 'Press to toggle WarPigs on/off')
+    end
     gui.elements.verbose_logs:render('Verbose logs', 'Print WarPlans quest diffs to console')
     gui.elements.log_all_quests:render('Log ALL quests', 'Print every newly-seen quest name + id to console (use to capture quest names for new activities)')
     gui.elements.main_tree:pop()

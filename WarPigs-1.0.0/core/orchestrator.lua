@@ -194,7 +194,7 @@ orchestrator.quest_plugin_map = {
         enable = function(p) p.run_boss('grigoire') end,
         disable_when = reaper_kill_disable_when,
     },
-    WarPlans_QST_BossLair_S2VampireLord = {  -- guess (zir, asset name)
+    WarPlans_QST_BossLair_Zir = {  -- CONFIRMED (log 2026-05-03: id=2317384)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('zir') end,
         disable_when = reaper_kill_disable_when,
