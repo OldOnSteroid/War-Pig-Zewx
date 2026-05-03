@@ -18,6 +18,12 @@ gui.chest_types_options = {
     "Gold",
 }
 
+gui.exit_modes_enum = {
+    RESET = 0,
+    TELEPORT = 1,
+}
+gui.exit_mode = { 'Reset', 'Teleport'}
+
 gui.elements = {
     main_tree = tree_node:new(0),
     main_toggle = create_checkbox(false, "main_toggle"),
@@ -59,6 +65,7 @@ gui.elements = {
     use_8_wave = create_checkbox(true, "use_8_wave"),
     use_10_wave = create_checkbox(true, "use_10_wave"),
     use_bloodied = create_checkbox(false, "use_bloodied"),
+    exit_mode = combo_box:new(0, get_hash(plugin_label .. "_exit_mode")),
 }
 
 function gui.render()
@@ -94,6 +101,7 @@ function gui.render()
         end
 
         -- Updated chest type selector to use the new enum structure
+        gui.elements.exit_mode:render("Exit mode", gui.exit_mode, "Select reset or teleport to exit horde")
         gui.elements.merry_go_round:render("Circle arena when wave completes", "Toggle to circle arene when wave completes to pick up stray Aethers")
         gui.elements.always_open_ga_chest:render("Always Open GA Chest", "Toggle to always open Greater Affix chest when available")
         gui.elements.chest_type_selector:render("Select Chest Type", gui.chest_types_options, "Select the type of chest to open")

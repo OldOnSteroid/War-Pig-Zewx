@@ -42,6 +42,11 @@ local task_files = {
     -- pathfind failure AND a Traversal_Gizmo is interactable nearby, so the
     -- bot uses the climb instead of staring at the cliff.
     'cross_traversal',
+    -- kill_boss must run above portal/explore_pit/kill_monster: once the pit
+    -- guardian spawns, nothing else should be able to pull the bot away. Also
+    -- handles "remembered hunt" — pathing back to the last known boss position
+    -- after death/revive without exploring.
+    'kill_boss',
     -- portal must run before exit_pit: exit_pit fires on BatmobilePlugin.is_done(),
     -- which can happen on intermediate floors before the bot has descended. With portal
     -- higher priority, any visible non-back descend portal wins; on the final floor

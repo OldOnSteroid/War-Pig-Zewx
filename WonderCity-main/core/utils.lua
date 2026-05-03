@@ -16,8 +16,10 @@ utils.is_looting = function ()
     end
     return false
 end
+-- Use get_all_actors() — the brazier and entrance portal are not in the ally
+-- list, so get_ally_actors() silently returned nil and the task stuck on idle.
 utils.get_spirit_brazier = function ()
-    local actors = actors_manager:get_ally_actors()
+    local actors = actors_manager:get_all_actors()
     for _, actor in pairs(actors) do
         local actor_name = actor:get_skin_name()
         if actor_name == 'Aubrie_Test_Undercity_Crafter' then
@@ -27,7 +29,7 @@ utils.get_spirit_brazier = function ()
     return nil
 end
 utils.get_entrance_portal = function ()
-    local actors = actors_manager:get_ally_actors()
+    local actors = actors_manager:get_all_actors()
     for _, actor in pairs(actors) do
         if actor:is_interactable() then
             local actor_name = actor:get_skin_name()

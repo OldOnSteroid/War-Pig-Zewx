@@ -28,8 +28,13 @@ local exit_with_debounce = function (delay)
         end
         task.debounce_time = get_time_since_inject()
         task.status = status_enum['EXIT']
-        console.print('reset dungeon')
-        reset_all_dungeons()
+        if settings.exit_mode == 1 then
+            console.print('teleport out')
+            teleport_to_waypoint(settings.town_waypoint)
+        else
+            console.print('reset dungeon')
+            reset_all_dungeons()
+        end
     end
 end
 

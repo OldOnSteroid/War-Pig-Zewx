@@ -88,8 +88,7 @@ local function chest_visible()
         if ok and inter then
             local name = a:get_skin_name()
             if type(name) == "string" then
-                if name:find("^EGB_Chest") or name:find("^Boss_WT_Belial_") or name:find("^Chest_Boss")
-                    or name:find("^S12_Prop_Theme_Chest_") then
+                if name:find("^EGB_Chest") or name:find("^Boss_WT_Belial_") or name:find("^Chest_Boss") then
                     return true
                 end
             end
@@ -278,7 +277,7 @@ function task.shouldExecute()
 
     -- Block navigation only while INSIDE the boss zone with altar already activated.
     -- If we've left the zone (e.g. Alfred restocked mid-run), allow navigating back
-    -- so the run can be completed (doom chest opened, reset_run called).
+    -- so the run can be completed (EGB chest opened, reset_run called).
     if tracker.altar_activated and in_target_zone(boss) then return false end
     if in_target_zone(boss) and chest_visible() then return false end
     -- Altar visible inside the zone: reset any active navigation and yield to interact_altar.

@@ -18,6 +18,14 @@ local task = {
     portal_exit = -1
 }
 
+-- After the boss dies the bot must hold near the glyphstone anchor (boss death
+-- position, snapped onto the gizmo when it spawns). ANCHOR_RADIUS is the
+-- "we're close enough — sit still" threshold; past it we long-path back.
+local ANCHOR_RADIUS = 6
+local _anchor_long_path_target = nil  -- vec3 we last issued a long_path to
+local _anchor_path_issue_time = -math.huge
+local ANCHOR_PATH_RETRY_INTERVAL = 2  -- seconds between repath attempts
+
 -- Speed mode: charge-through state
 local speed_target = nil              -- vec3 through-point we're heading toward
 local speed_reject_time = -math.huge  -- timestamp of last rejection
@@ -82,15 +90,76 @@ task.Execute = function ()
     orbwalker.set_clear_toggle(true)
     orbwalker.set_block_movement(true)
 
-    -- Freeze movement after boss kill while glyphstone spawns.
-    -- Still allow orbwalker to cast spells on nearby trash.
-    if tracker.boss_kill_time and
-        (get_time_since_inject() - tracker.boss_kill_time) < 10
-    then
+    -- Boss is alive / mid-fight: kill_boss owns movement. Defense in depth —
+    -- kill_boss is higher priority so we shouldn't reach here, but if it does
+    -- yield (e.g. transient state) don't explore away.
+    if tracker.boss_seen and not tracker.boss_dead then
         BatmobilePlugin.pause(plugin_label)
-        task.status = 'waiting for glyphstone'
+        task.status = 'boss active — yielding'
         return
     end
+
+    -- Boss dead: hold near the anchor (boss death pos, or the glyphstone once
+    -- it spawns). This replaces the old fixed-duration freeze so the bot can't
+    -- wander off chasing trash if the glyphstone takes a while to appear, and
+    -- always returns if it gets pulled away.
+    if tracker.boss_dead then
+        local glyph = utils.get_glyph_upgrade_gizmo()
+        if glyph then
+            -- Snap anchor onto the gizmo (precise) and stop here — exit_pit
+            -- (or upgrade_glyph) will take over via higher priority.
+            local gp = glyph:get_position()
+            tracker.glyph_anchor_pos = vec3:new(gp:x(), gp:y(), gp:z())
+            BatmobilePlugin.pause(plugin_label)
+            _anchor_long_path_target = nil
+            task.status = 'holding at glyphstone'
+            return
+        end
+        if tracker.glyph_anchor_pos then
+            local anchor = tracker.glyph_anchor_pos
+            local dist = utils.distance(local_player, anchor)
+            if dist > ANCHOR_RADIUS then
+                -- Pull back to the anchor; don't explore, don't chase trash.
+                BatmobilePlugin.pause(plugin_label)
+                BatmobilePlugin.update(plugin_label)
+                local now = get_time_since_inject()
+                local need_repath = false
+                if _anchor_long_path_target == nil then
+                    need_repath = (now - _anchor_path_issue_time) > ANCHOR_PATH_RETRY_INTERVAL
+                elseif utils.distance(anchor, _anchor_long_path_target) > 3 then
+                    need_repath = true
+                elseif not BatmobilePlugin.is_long_path_navigating()
+                    and (now - _anchor_path_issue_time) > ANCHOR_PATH_RETRY_INTERVAL
+                then
+                    need_repath = true
+                end
+                if need_repath then
+                    local started = BatmobilePlugin.navigate_long_path(plugin_label, anchor)
+                    if started then
+                        _anchor_long_path_target = vec3:new(anchor:x(), anchor:y(), anchor:z())
+                        _anchor_path_issue_time = now
+                    else
+                        _anchor_long_path_target = nil
+                        _anchor_path_issue_time = now
+                        console.print('[explore_pit] long_path back to glyph anchor failed — retrying soon')
+                    end
+                end
+                BatmobilePlugin.move(plugin_label)
+                task.status = string.format('returning to glyph anchor (%.1f)', dist)
+                return
+            end
+            -- Within anchor radius and no glyphstone yet — wait.
+            BatmobilePlugin.pause(plugin_label)
+            _anchor_long_path_target = nil
+            task.status = 'waiting at anchor for glyphstone'
+            return
+        end
+        -- boss_dead but no anchor recorded (shouldn't happen): just pause.
+        BatmobilePlugin.pause(plugin_label)
+        task.status = 'boss dead (no anchor) — pausing'
+        return
+    end
+    _anchor_long_path_target = nil
 
     if settings.speed_mode then
         local player_pos = get_player_position()

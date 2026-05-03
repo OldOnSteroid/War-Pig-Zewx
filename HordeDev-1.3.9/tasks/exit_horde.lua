@@ -2,6 +2,7 @@ local utils = require "core.utils"
 local settings = require "core.settings"
 local tracker = require "core.tracker"
 local explorer = require "core.explorer"
+local enums = require "data.enums"
 
 -- Reference the position from horde.lua
 local horde_boss_room_position = vec3:new(-36.17675, -36.3222, 2.200)
@@ -56,6 +57,28 @@ local exit_horde_task = {
             end
         end
 
+        if settings.exit_mode == 1 then
+            -- Teleport mode: skip walking to center / 5s wait, just leave.
+            if BatmobilePlugin then
+                BatmobilePlugin.pause(plugin_label)
+                BatmobilePlugin.clear_target(plugin_label)
+            end
+            console.print("Teleporting out of Horde to Library.")
+            teleport_to_waypoint(enums.waypoints.LIBRARY)
+            tracker.clear_runtime_timers()
+            tracker.victory_lap = false
+            tracker.victory_positions = nil
+            tracker.locked_door_found = false
+            tracker.exit_horde_start_time = nil
+            tracker.exit_horde_completion_time = current_time
+            tracker.horde_opened = false
+            tracker.sigil_used = false
+            tracker.start_dungeon_time = nil
+            tracker.boss_killed = false
+            exit_started = false
+            return
+        end
+
         if utils.distance_to(horde_boss_room_position) > 2 then
             console.print("Moving to boss room position.")
             move_to(horde_boss_room_position)
@@ -68,7 +91,7 @@ local exit_horde_task = {
             console.print("Starting 5-second timer before exiting Horde")
             tracker.exit_horde_start_time = current_time
         end
-        
+
         local elapsed_time = current_time - tracker.exit_horde_start_time
         if elapsed_time >= 5 then
             console.print("5-second timer completed. Resetting all dungeons")

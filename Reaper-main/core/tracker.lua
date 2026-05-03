@@ -18,7 +18,7 @@ local tracker = {
 
     -- sigil run coordination
     sigil_entry_t    = -999,   -- get_time_since_inject() when dungeon was entered
-    sigil_chest_done = false,  -- true once the Doom chest has been opened this run
+    -- (sigil_chest_done removed 2026-05-03 with Doom chest)
 
     -- session stats
     total_kills        = 0,
@@ -35,7 +35,6 @@ function tracker.reset_run()
     tracker.start_time              = 0
     tracker.finished_time           = 0
     tracker.chest_opened_time       = nil
-    tracker.sigil_chest_done        = false
     tracker.sigil_entry_t           = -999
 end
 

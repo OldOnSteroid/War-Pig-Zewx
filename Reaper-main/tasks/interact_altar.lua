@@ -66,7 +66,7 @@ local function any_chest_visible()
             local n = a:get_skin_name()
             if type(n) == "string" then
                 if n:find("^EGB_Chest") or n:find("^Chest_Boss")
-                    or n:find("^Boss_WT_Belial_") or n:find("^S12_Prop_Theme_Chest_") then
+                    or n:find("^Boss_WT_Belial_") then
                     return true
                 end
             end
@@ -140,7 +140,7 @@ function task.shouldExecute()
                 local name = actor:get_skin_name()
                 if type(name) == "string" then
                     if name:find("^EGB_Chest") or name:find("^Boss_WT_Belial_")
-                            or name:find("^Chest_Boss") or name:find("^S12_Prop_Theme_Chest_") then
+                            or name:find("^Chest_Boss") then
                         return false
                     end
                 end

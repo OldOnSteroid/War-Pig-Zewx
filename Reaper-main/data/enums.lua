@@ -82,8 +82,9 @@ end
 enums.chest_patterns = {
     "^EGB_Chest",
     "^Boss_WT_Belial_",
-    "^S12_Prop_Theme_Chest_",
     "^Chest_Boss",
+    -- Doom/seasonal "S12_Prop_Theme_Chest_" was removed from D4 (2026-05-03)
+    -- and is intentionally absent from this list; do not add back.
 }
 
 -- -------------------------------------------------------

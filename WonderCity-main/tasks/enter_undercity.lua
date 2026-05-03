@@ -16,6 +16,15 @@ local status_enum = {
 
 local CLICK_DELAY = 2.0  -- seconds to wait after every click action
 
+-- Brazier interact retry watchdog. The walk branch stops at distance <= 2,
+-- but the game's actual interaction range can be tighter than that. If
+-- interact_object() is spammed with no vendor screen response, lower the
+-- close-enough threshold so the next tick walks closer instead of looping.
+local INTERACT_RETRY_TIMEOUT       = 3.0
+local INTERACT_THRESHOLD_DEFAULT   = 2.0
+local INTERACT_THRESHOLD_STEP      = 0.4
+local INTERACT_THRESHOLD_FLOOR     = 0.6
+
 -- Steps shared by both flows. Bargain flow inserts extra steps between TRIBUTE_WAIT and OPEN_PORTAL.
 local STEP = {
     TRIBUTE             = 1,
@@ -50,6 +59,9 @@ local task = {
     step_time        = -1,
     bargain_idx      = 0,    -- current index into sorted bargain list
     bargain_walk_away = false,
+    interact_threshold  = INTERACT_THRESHOLD_DEFAULT,
+    interact_started_at = -1,
+    brazier_missing_logged = false,
 }
 
 local get_sorted_bargains = function ()
@@ -357,10 +369,32 @@ local open_portal = function (delay)
     local spirit_brazier = utils.get_spirit_brazier()
     if spirit_brazier == nil or spirit_brazier.get_position == nil then return end
 
+    local now = get_time_since_inject()
+
     if not loot_manager:is_in_vendor_screen() and not task.interacted then
+        if task.interact_started_at < 0 then
+            task.interact_started_at = now
+            console.print(string.format(
+                '[WonderCity:enter] interact spirit_brazier (threshold=%.2f)',
+                task.interact_threshold))
+        end
         interact_object(spirit_brazier)
+        if now - task.interact_started_at > INTERACT_RETRY_TIMEOUT then
+            local new_thr = math.max(
+                task.interact_threshold - INTERACT_THRESHOLD_STEP,
+                INTERACT_THRESHOLD_FLOOR)
+            if new_thr ~= task.interact_threshold then
+                task.interact_threshold = new_thr
+                console.print(string.format(
+                    '[WonderCity:enter] vendor screen never opened — tightening close-enough threshold to %.2f',
+                    new_thr))
+            end
+            task.interact_started_at = now
+        end
     elseif not task.interacted then
         task.interacted = true
+        task.interact_started_at = -1
+        task.interact_threshold = INTERACT_THRESHOLD_DEFAULT
         reset_state()
     end
 
@@ -422,12 +456,19 @@ task.Execute = function ()
         else
             enter_portal(portal)
         end
-    elseif spirit_brazier == nil or utils.distance(player_pos, spirit_brazier) > 2 then
+    elseif spirit_brazier == nil or utils.distance(player_pos, spirit_brazier) > task.interact_threshold then
         if spirit_brazier ~= nil then
             BatmobilePlugin.set_target(plugin_label, spirit_brazier)
             BatmobilePlugin.move(plugin_label)
             task.status = status_enum['WALKING'] .. 'spirit brazier'
+        else
+            task.status = status_enum['WAITING'] .. 'for spirit brazier (not found)'
+            if not task.brazier_missing_logged then
+                console.print('[WonderCity:enter] spirit brazier actor not found in get_all_actors() — check actor name (expected Aubrie_Test_Undercity_Crafter)')
+                task.brazier_missing_logged = true
+            end
         end
+        task.interact_started_at = -1
     elseif not settings.party_enabled then
         BatmobilePlugin.clear_target(plugin_label)
         open_portal(false)

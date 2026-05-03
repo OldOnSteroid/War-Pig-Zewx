@@ -53,7 +53,6 @@ local get_closest_enemies = function ()
     local closest_enemy, closest_enemy_dist
     local closest_elite, closest_elite_dist
     local closest_champ, closest_champ_dist
-    local closest_boss, closest_boss_dist
     for _, enemy in pairs(enemies) do
         if ignore_list[enemy:get_skin_name()] then goto continue end
         if is_enemy_unreachable(enemy:get_position()) then goto continue end
@@ -62,14 +61,10 @@ local get_closest_enemies = function ()
         -- failures that corrupt the unreachable cache.
         local enemy_pos = enemy:get_position()
         if math.abs(player_pos:z() - enemy_pos:z()) > 5 then goto continue end
+        -- Boss is owned by kill_boss task; never target it from here.
+        if enemy:is_boss() then goto continue end
         local health = enemy:get_current_health()
         local dist = utils.distance(player_pos, enemy)
-        if enemy:is_boss() and
-            (closest_boss_dist == nil or dist < closest_boss_dist)
-        then
-            closest_boss = enemy
-            closest_boss_dist = dist
-        end
         if health > 1 and dist <= effective_distance then
             if closest_enemy_dist == nil or dist < closest_enemy_dist then
                 closest_enemy = enemy
@@ -90,10 +85,8 @@ local get_closest_enemies = function ()
         end
         ::continue::
     end
-    return closest_enemy, closest_elite, closest_champ, closest_boss
+    return closest_enemy, closest_elite, closest_champ
 end
-
-local BOSS_KILL_FREEZE = 10 -- seconds to freeze movement after boss dies (wait for glyphstone)
 
 task.shouldExecute = function ()
     if settings.speed_mode then return false end
@@ -101,24 +94,14 @@ task.shouldExecute = function ()
     -- so don't peel off to chase trash and risk drifting out of range / losing the gizmo.
     -- upgrade_glyph keeps us pinned during upgrades; exit_pit takes over after.
     if utils.get_glyph_upgrade_gizmo() then return false end
-    local enemy, elite, champion, boss = get_closest_enemies()
-    -- Track boss presence so we can detect when it dies
-    if boss then
-        tracker.boss_seen = true
-    elseif tracker.boss_seen and tracker.boss_kill_time == nil then
-        -- Boss was alive last frame but is gone now = just died
-        tracker.boss_kill_time = get_time_since_inject()
-        tracker.boss_seen = false
-        console.print('[kill_monster] boss killed — freezing movement for ' .. BOSS_KILL_FREEZE .. 's while glyphstone spawns')
-    end
-    -- Don't chase trash for N seconds after boss kill (glyphstone needs time to spawn)
-    if tracker.boss_kill_time and
-        (get_time_since_inject() - tracker.boss_kill_time) < BOSS_KILL_FREEZE
-    then
-        return false
-    end
-    return (enemy ~= nil or elite ~= nil or
-        champion ~= nil or boss ~= nil) and
+    -- Boss is alive (or memory of one not yet dead): kill_boss owns this floor.
+    if tracker.boss_seen and not tracker.boss_dead then return false end
+    -- Boss is dead: don't path anywhere except the glyphstone anchor. The
+    -- anchor-return is handled by explore_pit (lower priority than this task,
+    -- so we yield by returning false here).
+    if tracker.boss_dead then return false end
+    local enemy, elite, champion = get_closest_enemies()
+    return (enemy ~= nil or elite ~= nil or champion ~= nil) and
         utils.player_in_pit()
 end
 task.Execute = function ()
@@ -129,8 +112,8 @@ task.Execute = function ()
     orbwalker.set_clear_toggle(true)
     orbwalker.set_block_movement(true)
 
-    local enemy, elite, champion, boss = get_closest_enemies()
-    local target = boss or champion or elite or enemy
+    local enemy, elite, champion = get_closest_enemies()
+    local target = champion or elite or enemy
 
     if target and utils.distance(local_player, target) > 1 then
         local target_pos = target:get_position()

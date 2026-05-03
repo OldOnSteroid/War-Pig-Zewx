@@ -79,10 +79,15 @@ task.shouldExecute = function ()
     local player_pos = local_player:get_position()
     local brazier = utils.get_spirit_brazier()
     local portal = utils.get_entrance_portal()
+    -- Yield at the same distance Execute considers "arrived" — otherwise the
+    -- distance window (LONG_PATH_ARRIVED-1, LONG_PATH_ARRIVED] makes
+    -- shouldExecute return true while Execute does nothing, blocking
+    -- enter_undercity from taking over and walking the last few meters to
+    -- the brazier.
     return utils.player_in_zone(settings.town_zone) and
         player_pos:x() ~= 0 and player_pos:y() ~= 0 and
         (portal == nil or utils.distance(player_pos, portal) > 5 ) and
-        (brazier == nil or utils.distance(player_pos, destination_proxy()) > 4)
+        (brazier == nil or utils.distance(player_pos, destination_proxy()) > LONG_PATH_ARRIVED)
 end
 
 task.Execute = function ()

@@ -14,6 +14,12 @@ gui.party_modes_enum = {
 }
 gui.party_mode = { 'Leader', 'Follower'}
 
+gui.exit_modes_enum = {
+    RESET = 0,
+    TELEPORT = 1,
+}
+gui.exit_mode = { 'Reset', 'Teleport'}
+
 gui.tributes = {}
 gui.tributes_enum = {}
 gui.tributes_data = {
@@ -125,6 +131,7 @@ gui.elements = {
     reset_timeout = slider_int:new(30, 900, 600, get_hash(plugin_label .. '_' .. 'reset_timeout')),
     boss_delay = slider_int:new(0, 30, 10, get_hash(plugin_label .. '_' .. 'boss_delay')),
     exit_undercity_delay = slider_int:new(0, 300, 10, get_hash(plugin_label .. '_' .. 'exit_undercity_delay')),
+    exit_mode = combo_box:new(0, get_hash(plugin_label .. '_' .. 'exit_mode')),
     loot_obols = create_checkbox(true, 'loot_obols'),
     max_enticement = slider_int:new(0, 9, 5, get_hash(plugin_label .. '_' .. 'max_enticement')),
     enticement_timeout = slider_int:new(0, 10, 4, get_hash(plugin_label .. '_' .. 'enticement_timeout')),
@@ -198,6 +205,7 @@ gui.render = function ()
         end
         gui.elements.reset_timeout:render("Reset Time (s)", "Set the time in seconds for resetting all dungeons")
         gui.elements.exit_undercity_delay:render('Exit delay (s)', 'time in seconds to wait before ending undercity')
+        gui.elements.exit_mode:render('Exit mode', gui.exit_mode, 'Select reset or teleport to exit undercity')
         gui.elements.boss_delay:render('Boss delay (s)', 'time in seconds to wait before engaging undercity boss')
         gui.elements.max_enticement:render('Max Enticement', 'maximum number of enticement to interact excluding beacon')
         gui.elements.enticement_timeout:render('Enticement delay (s)', 'time in seconds to wait before leaving enticement')

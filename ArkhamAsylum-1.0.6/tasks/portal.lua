@@ -310,10 +310,15 @@ task.Execute = function ()
         portal_used_time = get_time_since_inject()
         _long_path_target = nil
         BatmobilePlugin.stop_long_path(plugin_label)
-        -- Reset boss state so the post-kill freeze doesn't carry into the next floor
+        -- Reset per-floor boss state so detection / anchor / freeze don't
+        -- carry into the next floor. Boss only spawns on the final floor; if
+        -- we're crossing a portal we haven't fought it yet on this side.
         local tracker = require 'core.tracker'
         tracker.boss_kill_time = nil
         tracker.boss_seen = false
+        tracker.boss_position = nil
+        tracker.boss_dead = false
+        tracker.glyph_anchor_pos = nil
         interact_object(portal)
         task.status = status_enum['INTERACTING']
     end
