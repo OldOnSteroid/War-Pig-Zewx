@@ -28,6 +28,25 @@ end
 
 local SEL_MODES = { "Manual", "Round Robin", "Random" }
 
+-- Town options match ArkhamAsylum's order so a user picking the same town
+-- across plugins keeps Alfred / Reaper / Arkham in sync. Index resolved to
+-- zone/waypoint in core/settings.lua.
+gui.town = { 'Temis', 'Cerrigar' }
+gui.town_enum = {
+    TEMIS    = 0,
+    CERRIGAR = 1,
+}
+gui.town_data = {
+    [0] = {
+        zone_name    = 'Skov_Temis',
+        waypoint_sno = 0x1CE51E,
+    },
+    [1] = {
+        zone_name    = 'Scos_Cerrigar',
+        waypoint_sno = 0x76D58,
+    },
+}
+
 gui.elements = {
     main_tree   = tree_node:new(TREE_MAIN),
     main_toggle = cb(false, "main_toggle"),
@@ -41,6 +60,9 @@ gui.elements = {
 
     use_alfred    = cb(true,  "alfred"),
     use_batmobile = cb(false, "batmobile"),
+
+    -- Default 0 = Temis (matches ArkhamAsylum's default).
+    town          = cbo(0,    "town"),
 
     -- Run type toggles
     run_materials = cb(true,  "run_mats"),
@@ -92,6 +114,8 @@ function gui.render()
 
     -- ---- Settings ----
     if gui.elements.misc_tree:push("Settings") then
+        gui.elements.town:render("Home town", gui.town,
+            "Town to teleport to between runs. Match this to your Alfred / Arkham town setting.")
         gui.elements.use_alfred:render("Use Alfred",
             "Hand off inventory/repair/restock tasks to Alfred.")
         gui.elements.use_batmobile:render("Use Batmobile Navigation",

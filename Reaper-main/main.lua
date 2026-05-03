@@ -20,8 +20,8 @@ local tracker      = require "core.tracker"
 local enums        = require "data.enums"
 local materials    = require "core.materials"
 
-local CERRIGAR_WP   = 0x76D58
-local CERRIGAR_ZONE = "Scos_Cerrigar"
+-- Home town now resolved per pulse from settings.town_zone / settings.town_waypoint
+-- (driven by the gui.town combo_box). Defaults to Temis to match Arkham/Alfred.
 
 -- -------------------------------------------------------
 -- Enable guard — only fires once per toggle-on
@@ -134,12 +134,12 @@ on_update(function()
     local lp = get_local_player()
     if not lp then return end
 
-    -- When rotation is done, return to Cerrigar then disable
+    -- When rotation is done, return to home town then disable
     if rotation.is_done() or finishing then
         if not finishing then
-            console.print("[Reaper] All runs complete — returning to Cerrigar.")
+            console.print("[Reaper] All runs complete — returning to " .. settings.town_zone .. ".")
             task_manager.reset_all()
-            teleport_to_waypoint(CERRIGAR_WP)
+            teleport_to_waypoint(settings.town_waypoint)
             finishing     = true
             finish_tp_time = get_time_since_inject()
             return
@@ -147,7 +147,7 @@ on_update(function()
         local world   = get_current_world()
         local zone    = world and world:get_current_zone_name() or ""
         local elapsed = get_time_since_inject() - finish_tp_time
-        if zone == CERRIGAR_ZONE or elapsed > 30.0 then
+        if zone == settings.town_zone or elapsed > 30.0 then
             console.print("[Reaper] All runs complete. Disabling.")
             finishing          = false
             gui.elements.main_toggle:set(false)

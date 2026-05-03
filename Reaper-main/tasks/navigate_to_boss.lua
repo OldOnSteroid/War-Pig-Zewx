@@ -29,8 +29,7 @@ local pathwalker = require "core.pathwalker"
 local settings   = require "core.settings"
 
 local plugin_label  = 'reaper'
-local CERRIGAR_WP   = 0x76D58
-local CERRIGAR_ZONE = "Scos_Cerrigar"
+-- Home town resolved per pulse from settings.town_zone / settings.town_waypoint.
 
 -- -------------------------------------------------------
 -- Path-file variant loader (used when Batmobile is off)
@@ -232,7 +231,7 @@ function task.shouldExecute()
     local boss = rotation.current()
     -- If rotation is done and we're not in Cerrigar yet, run so Execute can teleport us out
     if rotation.is_done() then
-        return utils.get_zone() ~= CERRIGAR_ZONE
+        return utils.get_zone() ~= settings.town_zone
     end
     if not boss then return false end
 
@@ -243,7 +242,7 @@ function task.shouldExecute()
     end
 
     -- Reset settle timer whenever we leave Cerrigar (entered dungeon or zone changed)
-    if utils.get_zone() ~= CERRIGAR_ZONE then
+    if utils.get_zone() ~= settings.town_zone then
         _sigil_settle_t = -999
     end
 
@@ -263,7 +262,7 @@ function task.shouldExecute()
     -- In Cerrigar between sigil runs: yield to sigil_complete until the run
     -- is counted (sigil_entry_t reset to -999), then apply a settle delay.
     if nav.state == STATE.IDLE and boss.run_type == "sigil"
-            and utils.get_zone() == CERRIGAR_ZONE then
+            and utils.get_zone() == settings.town_zone then
         -- sigil_entry_t > 0 means we're still in the old run; yield to sigil_complete
         if tracker.sigil_entry_t > 0 then return false end
         -- Run is reset. Start (or check) the settle timer.
@@ -331,10 +330,10 @@ end
 function task.Execute()
     -- Rotation finished — get back to Cerrigar so main.lua can disable cleanly
     if rotation.is_done() then
-        if utils.get_zone() ~= CERRIGAR_ZONE then
+        if utils.get_zone() ~= settings.town_zone then
             if nav.state ~= STATE.WAIT_EXIT then
-                console.print("[Reaper] Rotation complete — returning to Cerrigar.")
-                teleport_to_waypoint(CERRIGAR_WP)
+                console.print("[Reaper] Rotation complete — returning to " .. settings.town_zone .. ".")
+                teleport_to_waypoint(settings.town_waypoint)
                 set_state(STATE.WAIT_EXIT)
             end
         end
@@ -357,7 +356,7 @@ function task.Execute()
             if boss.run_type == "sigil" and tracker.sigil_entry_t > 0
                     and (now() - tracker.sigil_entry_t) > 60.0 then
                 console.print("[Reaper] Sigil zone with no altar and entry expired — stale dungeon, teleporting out.")
-                teleport_to_waypoint(CERRIGAR_WP)
+                teleport_to_waypoint(settings.town_waypoint)
                 set_state(STATE.WAIT_EXIT)
                 return
             end
@@ -373,7 +372,7 @@ function task.Execute()
 
         -- Sigil run: shouldExecute already enforced the settle delay — just activate
         if boss.run_type == "sigil" then
-            if utils.get_zone() ~= CERRIGAR_ZONE then return end
+            if utils.get_zone() ~= settings.town_zone then return end
             local sigil = find_sigil_for_boss(boss.id)
             if not sigil then
                 console.print("[Reaper] No sigil found for " .. boss.label .. " — skipping.")
@@ -815,7 +814,7 @@ function task.Execute()
         end
         if (now() - nav.phase_start) > 20.0 then
             console.print("[Reaper] WAIT_EXIT timeout — retrying teleport.")
-            teleport_to_waypoint(CERRIGAR_WP)
+            teleport_to_waypoint(settings.town_waypoint)
             nav.phase_start = now()
         end
         return

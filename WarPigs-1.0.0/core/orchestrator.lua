@@ -255,6 +255,13 @@ local pending_disable_since = {}  -- plugin_name -> time when deferral started (
 local last_disable_time     = {}  -- plugin_name -> time the disable actually fired (for TRANSITION_GAP_SECONDS gate)
 local enable_blocked        = {}  -- plugin_name -> last gate-reason logged (suppresses repeat logs)
 local was_off        = {}  -- plugin_name -> true (we believe it is currently off; suppresses repeated logs)
+-- Track which trigger pattern was last used to enable each plugin. When the
+-- matched pattern changes mid-run (e.g. ReaperPlugin running Zir but a new
+-- Varshan WarPlan appears before Zir's kill+60s defer satisfies), re-fire
+-- enable() so the plugin's enable hook switches to the new boss. Without this
+-- the orchestrator owns the plugin under the OLD entry, the enable phase's
+-- edge-trigger short-circuits, and the plugin keeps running stale context.
+local last_enabled_reason   = {}  -- plugin_name -> pattern
 
 local function log(msg)
     console.print('[WarPigs] ' .. msg)
@@ -326,6 +333,7 @@ local function plugin_enable(entry, reason)
     if is_plugin_on(entry.plugin) then
         owned[entry.plugin] = true
         enable_blocked[entry.plugin] = nil
+        last_enabled_reason[entry.plugin] = reason
         if entry.plugin == 'ReaperPlugin' then reset_reaper_kill_baseline() end
         log('enabled ' .. entry.plugin .. ' (' .. (reason or '?') .. ')')
     else
@@ -345,6 +353,7 @@ local function plugin_disable(entry)
         end
     end
     owned[entry.plugin] = nil
+    last_enabled_reason[entry.plugin] = nil
     last_disable_time[entry.plugin] = get_time_since_inject()
 end
 
@@ -528,15 +537,35 @@ function orchestrator.tick()
 
     -- ── ENABLE PHASE ────────────────────────────────────────────────────────
     -- Edge-trigger: enable plugins newly wanted, unless gated.
+    -- ALSO re-fire enable when the matched pattern changes for an
+    -- already-owned plugin: Reaper's run_boss('zir') vs run_boss('varshan')
+    -- both target ReaperPlugin, so without re-firing the plugin would keep
+    -- running the old boss while WarPigs thinks the handoff is done.
     for plugin_name, entry in pairs(wants) do
-        if not last_wanted[plugin_name] and not owned[plugin_name] then
+        local newly_wanted = not last_wanted[plugin_name] and not owned[plugin_name]
+        local reason       = matched_reason[plugin_name]
+        local reason_changed = owned[plugin_name]
+            and reason
+            and last_enabled_reason[plugin_name]
+            and last_enabled_reason[plugin_name] ~= reason
+        if newly_wanted or reason_changed then
             if gate_reason then
                 if enable_blocked[plugin_name] ~= gate_reason then
                     log('deferring enable of ' .. plugin_name .. ' — ' .. gate_reason)
                     enable_blocked[plugin_name] = gate_reason
                 end
             else
-                plugin_enable(entry, matched_reason[plugin_name])
+                if reason_changed then
+                    log(string.format('re-enabling %s — pattern changed: %s -> %s',
+                        plugin_name, last_enabled_reason[plugin_name], reason))
+                    -- Clear the stale defer for the OLD pattern: the old
+                    -- entry's disable_when (e.g. Reaper kill+60s for the
+                    -- previous boss that was never actually killed) is no
+                    -- longer relevant once we hand off to a new entry.
+                    pending_disable[plugin_name]       = nil
+                    pending_disable_since[plugin_name] = nil
+                end
+                plugin_enable(entry, reason)
             end
         end
     end
@@ -563,6 +592,7 @@ function orchestrator.release_all()
     pending_disable_since = {}
     last_disable_time     = {}
     enable_blocked        = {}
+    last_enabled_reason   = {}
 end
 
 function orchestrator.get_status_line()

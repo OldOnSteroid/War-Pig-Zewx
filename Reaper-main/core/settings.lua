@@ -8,6 +8,13 @@ local settings = {
     use_alfred    = true,
     use_batmobile = false,
 
+    -- Resolved from gui.town selection in update_settings(). Defaults to
+    -- gui.town_data[0] (Temis) so first-frame reads are valid before the GUI
+    -- pulse runs. Tasks read these instead of hardcoding Cerrigar so the
+    -- selected home town is honoured everywhere.
+    town_zone     = gui.town_data[0].zone_name,
+    town_waypoint = gui.town_data[0].waypoint_sno,
+
     -- Run type toggles
     run_materials = true,   -- consumable material runs
     run_sigils    = true,   -- Bloodied + Bloodsoaked Lair Boss Sigil runs
@@ -30,6 +37,11 @@ function settings:update_settings()
     settings.enabled       = gui.elements.main_toggle:get()
     settings.use_alfred    = gui.elements.use_alfred:get()
     settings.use_batmobile = gui.elements.use_batmobile:get()
+
+    local town_idx        = gui.elements.town:get()
+    local town_data       = gui.town_data[town_idx] or gui.town_data[0]
+    settings.town_zone    = town_data.zone_name
+    settings.town_waypoint = town_data.waypoint_sno
 
     settings.run_materials = gui.elements.run_materials:get()
     settings.run_sigils    = gui.elements.run_sigils:get()

@@ -13,8 +13,9 @@ local enums        = require "data.enums"
 local explorerlite = require "core.explorerlite"
 local tracker      = require "core.tracker"
 local rotation     = require "core.boss_rotation"
+local settings     = require "core.settings"
 
-local CERRIGAR_WP    = 0x76D58
+
 local STUCK_TIMEOUT  = 60.0  -- inventory-driven runs: long timeout, recover and retry
 local EXTERNAL_LOCKOUT_DELAY = 25.0  -- external one-shot: after altar interact, lock the
                                      -- altar out at this window even if no chest appears.
@@ -110,7 +111,7 @@ function task.shouldExecute()
                     elapsed))
                 last_interact_time = 0
                 tracker.reset_run()
-                teleport_to_waypoint(CERRIGAR_WP)
+                teleport_to_waypoint(settings.town_waypoint)
             end
         end
         return false

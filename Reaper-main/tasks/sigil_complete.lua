@@ -15,8 +15,7 @@ local tracker  = require "core.tracker"
 local rotation = require "core.boss_rotation"
 local settings = require "core.settings"
 
-local CERRIGAR_WP   = 0x76D58
-local CERRIGAR_ZONE = "Scos_Cerrigar"
+-- Home town now resolved per pulse from settings.town_zone / settings.town_waypoint.
 local NO_ENEMY_TIMEOUT = 5.0   -- seconds with no enemies before declaring run complete
 
 local STATE = {
@@ -104,8 +103,8 @@ function task.Execute()
         end
 
         if idle_time >= NO_ENEMY_TIMEOUT then
-            console.print("[Reaper] Sigil run complete — teleporting to Cerrigar.")
-            teleport_to_waypoint(CERRIGAR_WP)
+            console.print("[Reaper] Sigil run complete — teleporting to " .. settings.town_zone .. ".")
+            teleport_to_waypoint(settings.town_waypoint)
             set_state(STATE.TELEPORTING)
         end
         return
@@ -119,11 +118,11 @@ function task.Execute()
         return
     end
 
-    -- ---- WAIT_TOWN: wait to land in Cerrigar, then count the run ----
+    -- ---- WAIT_TOWN: wait to land in the home town, then count the run ----
     if s.state == STATE.WAIT_TOWN then
-        if utils.player_in_zone(CERRIGAR_ZONE) then
+        if utils.player_in_zone(settings.town_zone) then
             if (t - s.t) >= 2.0 then
-                console.print("[Reaper] Back in Cerrigar — counting run.")
+                console.print("[Reaper] Back in " .. settings.town_zone .. " — counting run.")
                 rotation.consume_run()
                 tracker.reset_run()
                 set_state(STATE.IDLE)
@@ -133,7 +132,7 @@ function task.Execute()
         -- Timeout — retry teleport
         if (t - s.t) >= 20.0 then
             console.print("[Reaper] Town wait timeout — retrying teleport.")
-            teleport_to_waypoint(CERRIGAR_WP)
+            teleport_to_waypoint(settings.town_waypoint)
             set_state(STATE.TELEPORTING)
         end
         return
