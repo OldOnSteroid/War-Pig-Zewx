@@ -25,23 +25,73 @@ local MAX_DISABLE_DEFER_SECONDS = 120
 -- but the click must land after the UI has settled, and the quest teleport
 -- channel runs ~3-5s (matches teleport_to_waypoint).
 local TELEPORT_TAB_DELAY    = 0.5
-local TELEPORT_CLICK_DELAY  = 1.0
+-- 1.5s after Tab before clicking. The Quests / Map panel fade-in can run
+-- past 1s on slower frames and clicking before the target is rendered
+-- silently no-ops (the click lands on whatever's underneath the cursor in
+-- the world). Bumped from 1.0s to 1.5s based on user report of "Tab opens
+-- but nothing clicks".
+local TELEPORT_CLICK_DELAY  = 1.5
 local TELEPORT_SETTLE_DELAY = 5.0
 local TELEPORT_VK_TAB       = 0x09
+
+-- Predicates that gate the START of the teleport sequence. teleport_pending
+-- can be armed long before any of these pass; we hold the sequence until
+-- they're all true so we don't Tab/click while the player is still mid-
+-- loot-or-salvage cleanup.
+--   * in_town_attribute(): out of dungeon, no monsters.
+--   * Alfred idle: AlfredTheButlerPlugin (if loaded) reports all_task_done
+--     so an in-progress salvage/sell/restock isn't interrupted.
+local function in_town_attribute_for_teleport()
+    local lp = get_local_player()
+    if not lp then return false end
+    if not _G.attributes or _G.attributes.PLAYER_IN_TOWN_LEVEL_AREA == nil then
+        return true  -- attribute missing — fail-open so we don't deadlock
+    end
+    local ok, val = pcall(function()
+        return lp:get_attribute(attributes.PLAYER_IN_TOWN_LEVEL_AREA) == 1
+    end)
+    return ok and val == true
+end
+
+local function alfred_idle()
+    local alfred = _G.AlfredTheButlerPlugin
+    if not alfred or type(alfred.get_status) ~= 'function' then return true end
+    local ok, s = pcall(alfred.get_status)
+    if not ok or type(s) ~= 'table' then return true end
+    -- Not enabled = nothing to wait on. Enabled but all_task_done = idle.
+    if not s.enabled then return true end
+    return s.all_task_done == true
+end
+
+local function is_safe_to_teleport()
+    return in_town_attribute_for_teleport() and alfred_idle()
+end
 
 local teleport_transition = {
     state      = 'IDLE',  -- IDLE | WAIT_TAB | WAIT_CLICK | WAIT_SETTLE
     started_at = -math.huge,
 }
--- True when a new activity just started (any pattern transitioned from
--- unmatched → matched) and the teleport sequence still needs to fire.
--- Cleared once we transition the state machine out of IDLE. This drives:
---   * cold-start initial enable (no prior activity → first quest matches)
---   * plugin → plugin transitions (new pattern matches before old unmatches)
---   * the turn-in task (WarPlans_QST_TurnIn_Rewards becomes active)
+-- True when the teleport sequence still needs to start. Two trigger sources:
+--   * plugin_disable() — fires AFTER the previous activity's disable_when
+--     predicate satisfies (Reaper waits kill+60s for chest/loot, Pit/WC
+--     wait for town arrival post-Alfred-salvage). This means "previous
+--     activity finished cleanup, safe to teleport for the next one".
+--   * cold-start — when no plugin/task has ever been active in this WarPigs
+--     session and a quest first matches, fire teleport before the very
+--     first activity begins.
+-- A pattern-edge trigger ("next WarPlan's quest matches") was DELIBERATELY
+-- rejected: WarPlan quests unmatch the moment the boss dies, while the bot
+-- still has chests to open and loot to salvage. Triggering on the new
+-- pattern's match would interrupt that cleanup and lose the loot.
 local teleport_pending = false
--- Patterns that matched on the previous tick. Used for pattern-edge detection.
-local last_active_patterns = {}
+-- Suppresses repeat "teleport holding — in_town=… alfred_idle=…" logs while
+-- the sequence is waiting for its safety predicates. Cleared the moment we
+-- transition out of IDLE.
+local teleport_holding_logged = false
+-- Tracks whether ANY plugin/task has been active under this WarPigs session.
+-- False until the first activity starts; switched true on first activation
+-- so cold-start fires exactly once. Reset by release_all().
+local had_active_session = false
 
 -- Recent click marker log for the on-screen "where did the bot just click?"
 -- overlay. Same shape WonderCity uses: each entry fades over CLICK_FADE
@@ -428,6 +478,16 @@ local function plugin_disable(entry)
     owned[entry.plugin] = nil
     last_enabled_reason[entry.plugin] = nil
     last_disable_time[entry.plugin] = get_time_since_inject()
+    -- Arm the teleport sequence for the NEXT activity. plugin_disable only
+    -- fires after disable_when has satisfied, so by here:
+    --   * Reaper has waited kill+60s (chest open + loot pickup time)
+    --   * Pit/WC have landed in town (Alfred salvage already complete)
+    -- That means we're in a clean state and free to Tab → click → teleport
+    -- without losing loot. Sequence actually starts inside orchestrator.tick
+    -- once a new wanted plugin or matched task entry exists.
+    if settings.use_teleport_transition then
+        teleport_pending = true
+    end
 end
 
 -- Quest-dump mode: record every quest name+id we have ever seen and print
@@ -561,35 +621,34 @@ function orchestrator.tick()
         end
     end
 
-    -- ── TELEPORT TRIGGER (pattern edge) ─────────────────────────────────────
-    -- Compute the set of patterns that will actually drive activity this tick:
-    --   * a plugin pattern that won the preemption pass (its plugin is in wants)
-    --   * a task pattern that's currently matched (tasks aren't preempted)
-    -- Any pattern present this tick but absent last tick is a NEW activity
-    -- start — fire the teleport sequence so the player teleports onto the
-    -- quest before the activity begins. Covers cold-start initial enable,
-    -- plugin → plugin transitions, and the turn-in task at the end of a run.
-    local active_patterns = {}
-    for plugin_name in pairs(wants) do
-        local pat = matched_reason[plugin_name]
-        if pat then active_patterns[pat] = true end
-    end
-    for pattern, raw_entry in pairs(orchestrator.quest_plugin_map) do
-        if matches[pattern] then
-            local entry = normalize(raw_entry)
-            if entry.task then active_patterns[pattern] = true end
-        end
-    end
-    if settings.use_teleport_transition then
-        for pattern in pairs(active_patterns) do
-            if not last_active_patterns[pattern] then
-                log('teleport queued — new activity matched: ' .. pattern)
-                teleport_pending = true
-                break
+    -- ── COLD-START TELEPORT ─────────────────────────────────────────────────
+    -- For the very first activity in a WarPigs session there's no preceding
+    -- plugin_disable to arm the teleport, so detect "we have something to do
+    -- AND have never run before" and fire the sequence here. Plugin →
+    -- plugin and plugin → task transitions are armed inside plugin_disable
+    -- (which only fires after disable_when satisfies — i.e. AFTER chests
+    -- are looted, Alfred has salvaged, and the player is back in town).
+    if settings.use_teleport_transition and not had_active_session then
+        local has_any_plugin_want = next(wants) ~= nil
+        local has_any_task_match  = false
+        for pattern, raw_entry in pairs(orchestrator.quest_plugin_map) do
+            if matches[pattern] then
+                local entry = normalize(raw_entry)
+                if entry.task then has_any_task_match = true; break end
             end
         end
+        if has_any_plugin_want or has_any_task_match then
+            log('teleport queued — cold start (first activity of session)')
+            teleport_pending = true
+            had_active_session = true
+        end
+    elseif not had_active_session
+        and (next(wants) ~= nil or next(matches) ~= nil)
+    then
+        -- Even with the option off, mark that we've seen activity so a later
+        -- toggle of "Use teleport" doesn't retro-trigger a cold-start fire.
+        had_active_session = true
     end
-    last_active_patterns = active_patterns
 
     -- ── DISABLE PHASE (runs first) ──────────────────────────────────────────
     -- Every managed plugin without a matching trigger must be off. Honors
@@ -665,11 +724,32 @@ function orchestrator.tick()
         and teleport_pending
         and teleport_transition.state == 'IDLE'
     then
-        teleport_pending = false
-        teleport_transition.state      = 'WAIT_TAB'
-        teleport_transition.started_at = now
-        log('teleport transition started — Tab in '
-            .. tostring(TELEPORT_TAB_DELAY) .. 's')
+        if not is_safe_to_teleport() then
+            -- Hold pending: previous activity hasn't fully wrapped up yet
+            -- (still in dungeon collecting chest loot, or Alfred is mid-
+            -- salvage). teleport_pending stays true, we'll re-check next
+            -- tick. Log once when we first start holding so the user can
+            -- see *why* nothing is happening.
+            if not teleport_holding_logged then
+                local in_town = in_town_attribute_for_teleport()
+                local alfred_done = alfred_idle()
+                log(string.format(
+                    'teleport holding — in_town=%s alfred_idle=%s (waiting for cleanup)',
+                    tostring(in_town), tostring(alfred_done)))
+                teleport_holding_logged = true
+            end
+        else
+            teleport_pending          = false
+            teleport_holding_logged   = false
+            teleport_transition.state      = 'WAIT_TAB'
+            teleport_transition.started_at = now
+            log(string.format(
+                'teleport transition started — Tab in %.1fs, click target=(%d, %d), settle=%.1fs',
+                TELEPORT_TAB_DELAY,
+                settings.teleport_click_x or 0,
+                settings.teleport_click_y or 0,
+                TELEPORT_SETTLE_DELAY))
+        end
     end
     if teleport_transition.state == 'WAIT_TAB' then
         if (now - teleport_transition.started_at) >= TELEPORT_TAB_DELAY then
@@ -686,14 +766,26 @@ function orchestrator.tick()
         if (now - teleport_transition.started_at) >= TELEPORT_CLICK_DELAY then
             local x = settings.teleport_click_x or 0
             local y = settings.teleport_click_y or 0
-            if x > 0 and y > 0 and utility
-                and type(utility.send_mouse_click) == 'function'
-            then
+            local have_util = utility and type(utility.send_mouse_click) == 'function'
+            if x > 0 and y > 0 and have_util then
+                -- Move cursor onto the target before clicking. Some panels
+                -- ignore a click whose preceding mouse-position event landed
+                -- elsewhere; an explicit move forces the cursor to register
+                -- at (x, y) before the button event.
+                if type(utility.send_mouse_move) == 'function' then
+                    utility.send_mouse_move(x, y)
+                end
                 utility.send_mouse_click(x, y)
                 record_click('Teleport', x, y, 'left')
-                log(string.format('teleport transition: clicked (%d, %d)', x, y))
+                log(string.format('teleport transition: CLICKED (%d, %d)', x, y))
+            elseif not have_util then
+                log('teleport transition: SKIP click — utility.send_mouse_click missing')
             else
-                log(string.format('teleport transition: skipping click — coords=(%d,%d)', x, y))
+                log(string.format(
+                    'teleport transition: SKIP click — coords (%d,%d) are zero. ' ..
+                    'Set them via the GUI sliders or hover the in-game target ' ..
+                    'and press the Capture cursor key (default F5).',
+                    x, y))
             end
             teleport_transition.state      = 'WAIT_SETTLE'
             teleport_transition.started_at = now
@@ -790,9 +882,10 @@ function orchestrator.release_all()
     enable_blocked        = {}
     last_enabled_reason   = {}
     teleport_pending      = false
+    teleport_holding_logged = false
     teleport_transition.state      = 'IDLE'
     teleport_transition.started_at = -math.huge
-    last_active_patterns  = {}
+    had_active_session    = false
     recent_clicks         = {}
 end
 
