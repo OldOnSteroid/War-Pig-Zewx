@@ -13,8 +13,15 @@ local status_enum = {
 local task = {
     name = 'interact_enticement', -- change to your choice of task name
     status = status_enum['IDLE'],
-    interact_time = nil
+    interact_time = nil,
+    -- Debounce stamp for interact_object. Without this, when the game keeps
+    -- a beacon flagged as is_interactable() after attunement is already
+    -- complete (stale ally-actor state), the bot spams interact_object every
+    -- 50ms — locking the player in the ignite cast and never letting the
+    -- timeout fire. 1s gap between calls covers the beacon's ignite anim.
+    last_interact_call = nil,
 }
+local INTERACT_REFIRE_COOLDOWN = 1.0
 
 task.shouldExecute = function ()
     return utils.get_closest_enticement() ~= nil and
@@ -41,6 +48,7 @@ task.Execute = function ()
             local enticement_str = name .. tostring(enticement_pos:x()) .. tostring(enticement_pos:y())
             tracker.enticement[enticement_str] = true
             task.interact_time = nil
+            task.last_interact_call = nil
             task.status = status_enum['IDLE']
         elseif utils.distance(local_player, enticement) > 3 then
             BatmobilePlugin.set_target(plugin_label, enticement)
@@ -48,13 +56,27 @@ task.Execute = function ()
             task.status = status_enum['WALKING']
         else
             BatmobilePlugin.clear_target(plugin_label)
+            -- Start the timeout clock as soon as we're in interact range,
+            -- not only when is_interactable() returns false. The Grand
+            -- Beacon can stay flagged interactable even after attunement is
+            -- complete, in which case the previous logic (start timer in
+            -- the `elseif` branch) never started a timer and the bot was
+            -- locked spamming interact_object on a no-op beacon.
+            if task.interact_time == nil then
+                task.interact_time = get_time_since_inject()
+            end
             if enticement:is_interactable() then
                 orbwalker.set_clear_toggle(false)
-                interact_object(enticement)
+                -- Debounce: don't refire interact_object every tick. The
+                -- beacon ignite animation needs the previous call to
+                -- complete or the player just stutters in cast.
+                if task.last_interact_call == nil
+                    or (get_time_since_inject() - task.last_interact_call) >= INTERACT_REFIRE_COOLDOWN
+                then
+                    interact_object(enticement)
+                    task.last_interact_call = get_time_since_inject()
+                end
                 task.status = status_enum['INTERACTING']
-            elseif task.interact_time == nil then
-                task.interact_time = get_time_since_inject()
-                orbwalker.set_clear_toggle(true)
             else
                 orbwalker.set_clear_toggle(true)
                 local remaining = task.interact_time + timeout - get_time_since_inject()

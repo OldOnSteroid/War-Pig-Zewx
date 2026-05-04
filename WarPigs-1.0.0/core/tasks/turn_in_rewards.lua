@@ -23,6 +23,13 @@ local state         = STATE.IDLE
 local state_entered = 0
 local last_interact = -999
 local last_diag     = -999
+-- Debounce for our own teleport_to_waypoint calls. Even with the state machine,
+-- if the quest pattern flickers (matched true → false → true), tick(false)
+-- resets state to IDLE and the next tick(true) re-fires the IDLE→teleport
+-- branch. Without this, two teleport calls within ~5s cancel each other
+-- mid-channel. 6s comfortably covers the channel.
+local TELEPORT_DEBOUNCE_S = 6.0
+local last_teleport_time  = -math.huge
 
 local DIAG_INTERVAL = 4.0  -- seconds between "NPC not found" diagnostic dumps
 
@@ -42,6 +49,24 @@ local function get_zone()
     if not world then return '' end
     local ok, z = pcall(function() return world:get_current_zone_name() end)
     return (ok and type(z) == 'string') and z or ''
+end
+
+-- True if the player is currently in a town level area (any town — Cerrigar,
+-- Temis, Kyovashad, Kurast, etc.). Mirrors orchestrator's in_town_disable_when:
+-- we use the game's PLAYER_IN_TOWN_LEVEL_AREA attribute and treat any read
+-- failure as "true" so we don't deadlock on API quirks. Used to gate the
+-- IDLE->teleport branch so we don't fire while a dungeon plugin is still
+-- exiting (their teleport_to_waypoint and ours would cancel each other).
+local function in_town_attribute()
+    local lp = get_local_player()
+    if not lp then return false end
+    if not _G.attributes or _G.attributes.PLAYER_IN_TOWN_LEVEL_AREA == nil then
+        return true
+    end
+    local ok, val = pcall(function()
+        return lp:get_attribute(attributes.PLAYER_IN_TOWN_LEVEL_AREA) == 1
+    end)
+    return ok and val == true
 end
 
 local function find_npc()
@@ -96,11 +121,26 @@ function M.tick(active)
         if get_zone() == TEMIS_ZONE then
             log('Already in Temis — approaching Tyrael.')
             set_state(STATE.APPROACH_NPC)
-        else
-            log('Teleporting to Temis.')
-            teleport_to_waypoint(TEMIS_WP)
-            set_state(STATE.TELEPORTING)
+            return
         end
+        -- Don't compete with a dungeon-exit teleport that's already in
+        -- progress. ArkhamAsylum's exit_pit, WonderCity's exit_undercity,
+        -- and HordeDev's exit_horde each fire their own teleport_to_waypoint
+        -- when they're done with a run; if we also fire one here at the
+        -- same time, the two cancel each other's channels and the player
+        -- ends up running around interrupted in the dungeon. Wait for the
+        -- dungeon plugin to land us in a town first, THEN if it isn't Temis
+        -- we hop over.
+        if not in_town_attribute() then
+            return  -- still in a non-town zone (pit / undercity / horde) — let exit_* finish
+        end
+        if (now() - last_teleport_time) < TELEPORT_DEBOUNCE_S then
+            return  -- recent teleport channel still completing
+        end
+        log('Teleporting to Temis.')
+        teleport_to_waypoint(TEMIS_WP)
+        last_teleport_time = now()
+        set_state(STATE.TELEPORTING)
         return
     end
 
@@ -110,8 +150,13 @@ function M.tick(active)
             return
         end
         if (now() - state_entered) > TELEPORT_TIMEOUT then
-            log('Teleport timeout — retrying.')
-            teleport_to_waypoint(TEMIS_WP)
+            -- Same debounce applies on retry so the retry can't end up
+            -- cancelling its own previous channel.
+            if (now() - last_teleport_time) >= TELEPORT_DEBOUNCE_S then
+                log('Teleport timeout — retrying.')
+                teleport_to_waypoint(TEMIS_WP)
+                last_teleport_time = now()
+            end
             state_entered = now()
         end
         return

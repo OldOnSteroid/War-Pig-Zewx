@@ -63,9 +63,37 @@ local enter_portal = function (portal)
     tracker.reset_pit_state()
     task.status = status_enum['ENTERING'] .. tostring(settings.pit_level)
 end
+-- Close-range threshold (matches portal.lua). The pit obelisk sits on
+-- non-walkable terrain, so A* returns limit_partial; the partial-path
+-- watchdog later clears the custom target and the explorer drags us back
+-- to a frontier 17 units away — cue ping-pong: walk to obelisk → "no
+-- target, selecting new" → walk to frontier → enter_pit re-fires → loop.
+-- Below this distance, drive movement with pathfinder.force_move_raw,
+-- which is a direct move command Batmobile won't second-guess.
+local FORCE_MOVE_RANGE = 7
+
 local walk_to_activator = function (activator)
-    BatmobilePlugin.set_target(plugin_label, activator)
-    BatmobilePlugin.move(plugin_label)
+    -- activator may be a live actor (interactable, get_position()) or the
+    -- vec3 fallback (settings.town_pit_tower_pos). Resolve to a vec3.
+    local target_pos = activator
+    if activator and activator.get_position then
+        target_pos = activator:get_position()
+    end
+    local local_player = get_local_player()
+    local player_pos = local_player and local_player:get_position()
+    local dist = (player_pos and target_pos)
+        and utils.distance(player_pos, target_pos)
+        or math.huge
+    if dist <= FORCE_MOVE_RANGE then
+        -- Hold position via direct move + clear any stale Batmobile target so
+        -- the navigator's "no target or reached" branch is a no-op next tick
+        -- (it returns early when paused with target=nil).
+        BatmobilePlugin.clear_target(plugin_label)
+        pathfinder.force_move_raw(target_pos)
+    else
+        BatmobilePlugin.set_target(plugin_label, activator)
+        BatmobilePlugin.move(plugin_label)
+    end
     task.status = status_enum['WALKING'] .. 'portal activator'
 end
 task.shouldExecute = function ()

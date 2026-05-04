@@ -20,10 +20,20 @@ local exit_with_debounce = function (delay)
         task.status = status_enum['WAITING'] ..
         ' exit delay ' .. string.format("%.2f", wait_time) .. 's'
     else
-        if delay and task.debounce_time ~= nil and
+        -- Always debounce. teleport_to_waypoint and reset_all_dungeons each
+        -- have a multi-second cast/channel that gets CANCELLED if the call
+        -- fires again before the previous one completes. Without this guard,
+        -- the action fires every 50ms — the channel never finishes, the
+        -- player runs around (input returns between cancellations), and the
+        -- bot looks like it's stuck in the dungeon. The original `delay`
+        -- flag only enabled this check in party mode, leaving non-party
+        -- users spamming the teleport. confirm_delay (default 5s) covers
+        -- the channel.
+        if task.debounce_time ~= nil and
             task.debounce_time + settings.confirm_delay > get_time_since_inject()
         then
-            task.status = status_enum['WAITING'] .. ' for confirmation'
+            task.status = status_enum['WAITING'] .. ' for ' ..
+                (settings.exit_mode == 1 and 'teleport' or 'reset') .. ' to complete'
             return
         end
         task.debounce_time = get_time_since_inject()
@@ -47,6 +57,16 @@ end
 task.Execute = function ()
     local local_player = get_local_player()
     if not local_player then return end
+    -- Stop any in-flight long_path navigation BEFORE pausing. Batmobile's
+    -- main_pulse re-runs navigator.unpause() + update() + move() every frame
+    -- while long_path.navigating is true, which overrides our pause and
+    -- keeps the player walking — that movement cancels the teleport channel.
+    if BatmobilePlugin.is_long_path_navigating
+        and BatmobilePlugin.is_long_path_navigating()
+    then
+        BatmobilePlugin.stop_long_path(plugin_label)
+    end
+    BatmobilePlugin.clear_target(plugin_label)
     BatmobilePlugin.pause(plugin_label)
     if BatmobilePlugin.is_done() and not tracker.exit_reset then
         BatmobilePlugin.reset(plugin_label)

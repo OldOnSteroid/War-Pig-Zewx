@@ -11,6 +11,14 @@ local current_city_index = 0
 -- Cleared only when helltide_active() returns false (minute >= 55, new hour).
 local confirmed_helltide_tp = nil
 
+-- Debounce for the idle-town teleport. The "wait until helltide starts"
+-- branch fires teleport_to_waypoint(town) every pulse for as long as the
+-- player isn't in the town zone — but the teleport is a multi-second channel
+-- that gets cancelled if re-fired before completion, so the player ends up
+-- spinning in place instead of arriving. 6s covers the channel + arrival.
+local IDLE_TELEPORT_DEBOUNCE_S = 6.0
+local idle_teleport_fired_time = nil
+
 local function detect_helltide_zone()
     for _, tp in ipairs(enums.helltide_tps) do
         if utils.player_in_region(tp.region) then
@@ -90,7 +98,17 @@ local search_helltide_task = {
                         end)
                     end
                 end
-                teleport_to_waypoint(settings.town_waypoint) -- Idle in selected home town until helltide starts
+                local now = get_time_since_inject()
+                if not idle_teleport_fired_time
+                    or now - idle_teleport_fired_time >= IDLE_TELEPORT_DEBOUNCE_S
+                then
+                    teleport_to_waypoint(settings.town_waypoint) -- Idle in selected home town until helltide starts
+                    idle_teleport_fired_time = now
+                end
+            else
+                -- We're in the home town zone — channel completed, drop the
+                -- debounce stamp so the next "go idle" cycle fires immediately.
+                idle_teleport_fired_time = nil
             end
             return
         elseif utils.is_in_helltide() then

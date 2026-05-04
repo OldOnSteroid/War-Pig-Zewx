@@ -33,6 +33,13 @@ local function move_to(pos)
 end
 
 local exit_started = false
+-- Debounce for teleport_to_waypoint. The teleport is a multi-second channel
+-- that gets CANCELLED if fired again before completion. shouldExecute keeps
+-- returning true for the whole channel (still in BSK zone), so without this
+-- guard Execute spams teleport every pulse and the channel never finishes.
+-- 5s window covers the channel + brief settle on arrival.
+local TELEPORT_DEBOUNCE_S = 5.0
+local teleport_fired_time = nil
 
 local exit_horde_task = {
     name = "Exit Horde",
@@ -59,12 +66,31 @@ local exit_horde_task = {
 
         if settings.exit_mode == 1 then
             -- Teleport mode: skip walking to center / 5s wait, just leave.
+            -- Stop any in-flight long_path navigation BEFORE pausing.
+            -- Batmobile's main_pulse re-runs navigator.unpause+update+move
+            -- every frame while long_path.navigating is true, which overrides
+            -- our pause and walks the player around — that movement cancels
+            -- the teleport channel.
             if BatmobilePlugin then
+                if BatmobilePlugin.is_long_path_navigating
+                    and BatmobilePlugin.is_long_path_navigating()
+                then
+                    BatmobilePlugin.stop_long_path(plugin_label)
+                end
                 BatmobilePlugin.pause(plugin_label)
                 BatmobilePlugin.clear_target(plugin_label)
             end
+            -- Debounce so the channel can complete instead of being
+            -- re-fired every 50ms. Once the player lands in the Library,
+            -- shouldExecute returns false (zone changed) and we stop.
+            if teleport_fired_time
+                and current_time - teleport_fired_time < TELEPORT_DEBOUNCE_S
+            then
+                return
+            end
             console.print("Teleporting out of Horde to Library.")
             teleport_to_waypoint(enums.waypoints.LIBRARY)
+            teleport_fired_time = current_time
             tracker.clear_runtime_timers()
             tracker.victory_lap = false
             tracker.victory_positions = nil

@@ -458,8 +458,20 @@ task.Execute = function ()
         end
     elseif spirit_brazier == nil or utils.distance(player_pos, spirit_brazier) > task.interact_threshold then
         if spirit_brazier ~= nil then
-            BatmobilePlugin.set_target(plugin_label, spirit_brazier)
-            BatmobilePlugin.move(plugin_label)
+            -- Close-range: skip Batmobile A*. The brazier sits on non-walkable
+            -- terrain — A* returns limit_partial, the partial-path watchdog
+            -- clears the custom target, the explorer picks a frontier and
+            -- drags us off. force_move_raw is a direct move command, no
+            -- second-guessing, so we hold position long enough for the
+            -- vendor screen to open. Mirrors enter_pit.lua + portal.lua.
+            local brazier_pos = spirit_brazier:get_position()
+            if utils.distance(player_pos, brazier_pos) <= 7 then
+                BatmobilePlugin.clear_target(plugin_label)
+                pathfinder.force_move_raw(brazier_pos)
+            else
+                BatmobilePlugin.set_target(plugin_label, spirit_brazier)
+                BatmobilePlugin.move(plugin_label)
+            end
             task.status = status_enum['WALKING'] .. 'spirit brazier'
         else
             task.status = status_enum['WAITING'] .. 'for spirit brazier (not found)'

@@ -102,6 +102,30 @@ end
 --     trigger pattern matches; tick(false) when it stops. Used for actions
 --     WarPigs performs itself (teleport, NPC interaction) instead of just
 --     toggling another plugin.
+-- Activity-plugin preemption priority. When more than one plugin's quest is
+-- matched simultaneously, only the highest-priority one stays "wanted" — the
+-- rest are treated as if their quest had gone unmatched (disabled per the
+-- normal disable/disable_when path).
+--
+-- Why: WarPlans for short-lived objectives (Pit, Boss runs, Hordes) frequently
+-- overlap with ambient/long-running activities (Undercity, Helltide). Without
+-- preemption, both plugins stay enabled and fight for BatmobilePlugin/orbwalker
+-- — in practice the ambient one wins the per-pulse race because it's already
+-- mid-run, and the short-lived objective never starts. Specifically, completing
+-- a Kurast boss and returning to Temis with an active Pit WarPlan should hand
+-- off to Arkham; before this preemption, WonderCity just looped into the next
+-- Undercity run instead.
+--
+-- Higher number = higher priority. Plugins not listed default to 0 (no
+-- preemption — they always run alongside others if their quest matches).
+local PLUGIN_PRIORITY = {
+    ArkhamAsylumPlugin     = 100,  -- Pit: short objective, preempt ambient activities
+    InfernalHordesPlugin   = 90,   -- Horde wave: also short
+    ReaperPlugin           = 80,   -- Boss runs: short
+    WonderCityPlugin       = 50,   -- Undercity: ambient/repeatable
+    HelltideRevampedPlugin = 40,   -- Helltide: ambient/timed
+}
+
 orchestrator.quest_plugin_map = {
     WarPlans_QST_ThePit = {
         plugin = 'ArkhamAsylumPlugin',
@@ -437,6 +461,34 @@ function orchestrator.tick()
         elseif matched and entry.plugin and not wants[entry.plugin] then
             wants[entry.plugin]          = entry
             matched_reason[entry.plugin] = pattern
+        end
+    end
+
+    -- ── PREEMPTION ──────────────────────────────────────────────────────────
+    -- When multiple activity plugins match at the same time, only the highest
+    -- priority one stays wanted. Demoted plugins fall through to the disable
+    -- phase (disable_when still applies, so an in-flight activity gets to
+    -- wrap up before being cut). Priorities are static — see PLUGIN_PRIORITY.
+    do
+        local max_priority = -1
+        local max_owner    = nil
+        for plugin_name in pairs(wants) do
+            local p = PLUGIN_PRIORITY[plugin_name] or 0
+            if p > max_priority then
+                max_priority = p
+                max_owner    = plugin_name
+            end
+        end
+        if max_priority > 0 then
+            for plugin_name in pairs(wants) do
+                local p = PLUGIN_PRIORITY[plugin_name] or 0
+                if p < max_priority then
+                    log(string.format('preempting %s (priority %d) — %s (priority %d) also matched',
+                        plugin_name, p, max_owner, max_priority))
+                    wants[plugin_name]          = nil
+                    matched_reason[plugin_name] = nil
+                end
+            end
         end
     end
 
