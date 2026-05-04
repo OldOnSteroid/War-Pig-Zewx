@@ -13,6 +13,7 @@ local settings = {
     reset_time = 1,
     selected_chest_type = 0,
     always_open_ga_chest = true,
+    always_open_talisman_chest = false,
     merry_go_round = true,
     movement_spell_to_objective = true,
     use_evade_as_movement_spell = true,
@@ -52,6 +53,7 @@ function settings:update_settings()
     settings.path_angle = gui.elements.path_angle_slider:get()
     settings.selected_chest_type = gui.elements.chest_type_selector:get()
     settings.always_open_ga_chest = gui.elements.always_open_ga_chest:get()
+    settings.always_open_talisman_chest = gui.elements.always_open_talisman_chest:get()
     settings.merry_go_round = gui.elements.merry_go_round:get()
     settings.movement_spell_to_objective = gui.elements.movement_spell_to_objective:get()
     settings.use_evade_as_movement_spell = gui.elements.use_evade_as_movement_spell:get()

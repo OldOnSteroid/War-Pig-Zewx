@@ -47,7 +47,35 @@ local chest_state = {
     PAUSED_FOR_SALVAGE = "PAUSED_FOR_SALVAGE",
 }
 
-local chest_order = {"GREATER_AFFIX", "SELECTED"}
+-- Order chests are tried in.  TALISMAN sits first so when the WarPlans bonus
+-- chest is enabled and present, it's opened before GA / selected.  Each entry's
+-- inclusion is gated by the matching predicate in `chest_enabled` below.
+local chest_order = {"TALISMAN", "GREATER_AFFIX", "SELECTED"}
+
+-- Predicates matching chest_order entries.  When false, the picker skips that
+-- entry — keeps the order static while letting the user opt-out of any chest.
+local function chest_enabled(name)
+    if name == "TALISMAN" then
+        return settings.always_open_talisman_chest
+            and not tracker.talisman_chest_opened
+    elseif name == "GREATER_AFFIX" then
+        return settings.always_open_ga_chest
+            and not tracker.ga_chest_opened
+    elseif name == "SELECTED" then
+        return true  -- always tried as the final fallback
+    end
+    return false
+end
+
+-- Returns the index of the next chest_order entry that's enabled, starting at
+-- `from` (1-based).  When no enabled entry is found, returns the last index
+-- (SELECTED) so we always have something to fall back to.
+local function next_enabled_index(from)
+    for i = from, #chest_order do
+        if chest_enabled(chest_order[i]) then return i end
+    end
+    return #chest_order  -- SELECTED is the safety net
+end
 
 local open_chests_task = {
     name = "Open Chests",
@@ -127,23 +155,27 @@ local open_chests_task = {
 
     init_chest_opening = function(self)
         console.print("Initializing chest opening")
+        console.print("settings.always_open_talisman_chest: " .. tostring(settings.always_open_talisman_chest))
         console.print("settings.always_open_ga_chest: " .. tostring(settings.always_open_ga_chest))
         console.print("tracker.ga_chest_opened: " .. tostring(tracker.ga_chest_opened))
+        console.print("tracker.talisman_chest_opened: " .. tostring(tracker.talisman_chest_opened))
         console.print("settings.selected_chest_type: " .. tostring(settings.selected_chest_type))
-    
+
         -- Always set self.selected_chest_type
         local chest_type_map = {"MATERIALS", "GOLD"}
         self.selected_chest_type = chest_type_map[(settings.selected_chest_type or 0) + 1]
-    
-        -- If no aether, proceed with chest selection
-        self.current_chest_index = 1
-        if settings.always_open_ga_chest and not tracker.ga_chest_opened then
-            self.current_chest_type = "GREATER_AFFIX"
-        else
-            self.current_chest_index = 2  -- Skip to SELECTED
+
+        -- Pick the first enabled chest in chest_order.  TALISMAN sits at index
+        -- 1; if its toggle is off (or already opened), the picker skips ahead
+        -- to GA, then SELECTED.
+        self.current_chest_index = next_enabled_index(1)
+        local picked = chest_order[self.current_chest_index]
+        if picked == "SELECTED" then
             self.current_chest_type = self.selected_chest_type
+        else
+            self.current_chest_type = picked
         end
-        
+
         console.print("self.selected_chest_type: " .. tostring(self.selected_chest_type))
         console.print("self.current_chest_type: " .. tostring(self.current_chest_type))
 
@@ -201,10 +233,18 @@ local open_chests_task = {
         local chest_type_map = {"MATERIALS", "GOLD"}
         self.selected_chest_type = chest_type_map[settings.selected_chest_type + 1]
         console.print("New self.selected_chest_type: " .. tostring(self.selected_chest_type))
-        if not tracker.ga_chest_opened and settings.always_open_ga_chest and utils.get_chest(enums.chest_types["GREATER_AFFIX"]) then
-            self.current_chest_type = "GREATER_AFFIX"
+        -- Priority order: TALISMAN > GREATER_AFFIX > SELECTED.  Each is taken
+        -- only when its toggle is on, the chest hasn't been opened this run,
+        -- and the actor is actually present in the room.
+        if chest_enabled("TALISMAN") and utils.get_chest(enums.chest_types["TALISMAN"]) then
+            self.current_chest_index = 1
+            self.current_chest_type  = "TALISMAN"
+        elseif chest_enabled("GREATER_AFFIX") and utils.get_chest(enums.chest_types["GREATER_AFFIX"]) then
+            self.current_chest_index = 2
+            self.current_chest_type  = "GREATER_AFFIX"
         else
-            self.current_chest_type = self.selected_chest_type
+            self.current_chest_index = 3
+            self.current_chest_type  = self.selected_chest_type
         end
         console.print("Final self.current_chest_type: " .. tostring(self.current_chest_type))
         self.current_state = chest_state.MOVING_TO_CHEST
@@ -321,7 +361,9 @@ local open_chests_task = {
         console.print("Current self.selected_chest_type: " .. tostring(self.selected_chest_type))
 
         local function move_to_next_chest()
-            self.current_chest_index = (self.current_chest_index or 0) + 1
+            -- Skip past disabled / already-opened chests so we don't waste
+            -- ticks trying GA when its toggle is off.
+            self.current_chest_index = next_enabled_index((self.current_chest_index or 0) + 1)
             if self.current_chest_index <= #chest_order then
                 local next_chest = chest_order[self.current_chest_index]
                 if next_chest == "SELECTED" then
@@ -335,7 +377,9 @@ local open_chests_task = {
         end
 
         if was_successful then
-            if self.current_chest_type == "GREATER_AFFIX" then
+            if self.current_chest_type == "TALISMAN" then
+                tracker.talisman_chest_opened = true
+            elseif self.current_chest_type == "GREATER_AFFIX" then
                 tracker.ga_chest_opened = true
             elseif self.current_chest_type == self.selected_chest_type then
                 tracker.selected_chest_opened = true
@@ -357,7 +401,19 @@ local open_chests_task = {
 
     wait_for_loot = function(self)
         console.print("waiting for loot")
-        if tracker.ga_chest_opened and not tracker.selected_chest_opened then
+        if tracker.talisman_chest_opened
+            and not tracker.ga_chest_opened
+            and not tracker.selected_chest_opened
+        then
+            -- Same wait-for-loot timing pattern as the GA branch below: hold
+            -- on the chest position for `wait_loot_delay` so Looteer / Alfred
+            -- can sweep before we walk to the next chest.
+            console.print("Waiting Talisman loot based on wait loot delay.")
+            if not tracker.check_time("wait_for_talisman_loot_delay", settings.wait_loot_delay) then
+                return false
+            end
+            console.print("Talisman chest looted")
+        elseif tracker.ga_chest_opened and not tracker.selected_chest_opened then
             console.print("Waiting GA loot based on wait loot delay.")
             if not tracker.check_time("wait_for_ga_loot_delay", settings.wait_loot_delay) then
                 return false
@@ -387,12 +443,14 @@ local open_chests_task = {
             tracker.gold_chest_opened = true
         end
     
-        if self.current_chest_type == "GREATER_AFFIX" then
+        if self.current_chest_type == "TALISMAN" then
+            tracker.talisman_chest_opened = true
+        elseif self.current_chest_type == "GREATER_AFFIX" then
             tracker.ga_chest_opened = true
         elseif self.current_chest_type == self.selected_chest_type then
             tracker.selected_chest_opened = true
         end
-    
+
         tracker.finished_chest_looting = true
 
         console.print("Set tracker.finished_chest_looting to true in finish_chest_opening")
@@ -407,6 +465,7 @@ local open_chests_task = {
         tracker.finished_chest_looting = false
 
         tracker.ga_chest_opened = false
+        tracker.talisman_chest_opened = false
         tracker.selected_chest_opened = false
         tracker.gold_chest_opened = false
         console.print("Reset open_chests_task and related tracker flags")

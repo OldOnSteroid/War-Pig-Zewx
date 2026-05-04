@@ -33,12 +33,14 @@ end
 local task_files = {
     'teleport_cerrigar',
     'd4assistant',
-    'upgrade_glyph',
-    -- consume_chorons_soul fires on the same final-floor window as upgrade_glyph
-    -- (the soul actor only spawns alongside the Awakened Glyphstone after the boss
-    -- dies).  Sits below upgrade_glyph so glyphs are upgraded first, but above
-    -- alfred / portal / exit_pit so the soul is consumed before we leave the floor.
+    -- consume_chorons_soul runs ABOVE upgrade_glyph: the soul converts unspent
+    -- upgrade chances into XP, so if upgrade_glyph fired first it would burn
+    -- through the chances on glyphs instead.  When the soul setting is off
+    -- (default) consume_chorons_soul.shouldExecute returns false immediately
+    -- and upgrade_glyph proceeds normally.  Both gate on "no soul left or
+    -- already maxed out" so the chain proceeds to alfred / portal / exit_pit.
     'consume_chorons_soul',
+    'upgrade_glyph',
     'alfred',
     'enter_pit',
     -- cross_traversal must run before portal: when the portal is across a

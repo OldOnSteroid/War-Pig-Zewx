@@ -33,6 +33,17 @@ local TELEPORT_TAB_DELAY    = 0.5
 local TELEPORT_CLICK_DELAY  = 1.5
 local TELEPORT_SETTLE_DELAY = 5.0
 local TELEPORT_VK_TAB       = 0x09
+
+-- Plugins that MUST land outside of town for the activity to make sense.
+-- After WAIT_SETTLE finishes we check `in_town_disable_when()`: if we're still
+-- in town the click missed (UI not ready, wrong coords, etc.) → restart the
+-- Tab+click sequence instead of enabling the plugin in town and watching it
+-- crash or do nothing.  Capped at TELEPORT_RETRY_MAX so a misconfigured click
+-- target can't infinite-loop.
+local TELEPORT_REQUIRE_LEAVE_TOWN = {
+    InfernalHordesPlugin = true,  -- Hordes script blows up if started in Temis
+}
+local TELEPORT_RETRY_MAX = 4
 -- Hold time AFTER the incoming activity first appears in the matched set.
 -- Stops us from pressing Tab the same tick the previous WarPlan unmatched —
 -- the next WarPlan (e.g. TurnIn) typically lands ~1 second later, and the
@@ -77,6 +88,14 @@ end
 local teleport_transition = {
     state      = 'IDLE',  -- IDLE | WAIT_TAB | WAIT_CLICK | WAIT_SETTLE
     started_at = -math.huge,
+    -- Captured when the sequence starts (entering WAIT_TAB) so the post-settle
+    -- verification step knows which plugin we're trying to teleport into.
+    -- nil while IDLE.
+    incoming_plugin = nil,
+    -- Counts WAIT_TAB → WAIT_SETTLE → (still in town) → WAIT_TAB cycles for
+    -- the current activity.  Reset whenever the sequence finishes successfully
+    -- or we abort.  Compared against TELEPORT_RETRY_MAX.
+    retry_count = 0,
 }
 -- True when the teleport sequence still needs to start. Two trigger sources:
 --   * plugin_disable() — fires AFTER the previous activity's disable_when
@@ -555,6 +574,16 @@ end
 -- spam.  Cleared the moment is_dead() goes false.
 local was_dead          = false
 
+-- Filler-pit state for `settings.run_pit_after_turnin`.  We arm the filler
+-- once at least one WarPlans_QST_TurnIn_Rewards cycle has completed in this
+-- session (matched → unmatched edge); after arming, whenever no real WarPlans
+-- quest is active and no internal task is running, we inject ArkhamAsylumPlugin
+-- into `wants` so pit fills the gap.  Cleared by `release_all`.
+local TURN_IN_PATTERN          = 'WarPlans_QST_TurnIn_Rewards'
+local turn_in_was_matched      = false
+local had_turn_in_complete     = false
+local pit_filler_active_logged = false   -- dedup the "filler engaged"/"yielded" logs
+
 function orchestrator.tick()
     if settings.log_all_quests then dump_all_quests() end
 
@@ -575,11 +604,13 @@ function orchestrator.tick()
         if teleport_transition.state ~= 'IDLE' then
             log('died mid-transition (state=' .. teleport_transition.state ..
                 ') — re-arming teleport sequence for after respawn')
-            teleport_transition.state      = 'IDLE'
-            teleport_transition.started_at = -math.huge
-            teleport_pending               = true
-            teleport_incoming_first_seen   = nil
-            teleport_holding_logged        = false
+            teleport_transition.state           = 'IDLE'
+            teleport_transition.started_at      = -math.huge
+            teleport_transition.incoming_plugin = nil
+            teleport_transition.retry_count     = 0
+            teleport_pending                    = true
+            teleport_incoming_first_seen        = nil
+            teleport_holding_logged             = false
         elseif settings.use_teleport_transition and not teleport_pending then
             -- Death outside an active transition still likely cancelled any
             -- in-progress in-game teleport channel (common when a mob hits
@@ -674,6 +705,76 @@ function orchestrator.tick()
         for pattern in pairs(last_matches) do
             if not matches[pattern] then log('trigger unmatched: ' .. pattern) end
         end
+    end
+
+    -- ── RUN PIT AFTER TURN-IN ───────────────────────────────────────────────
+    -- Track the turn-in pattern's matched→unmatched edge.  First time we see
+    -- it, arm the pit filler for the rest of the session.  This way cold-start
+    -- with no WarPlans quests doesn't auto-launch pit — the user has to have
+    -- completed at least one WarPlans cycle first.
+    local turn_in_matched_now = matches[TURN_IN_PATTERN] == true
+    if turn_in_was_matched and not turn_in_matched_now and not had_turn_in_complete then
+        had_turn_in_complete = true
+        log('turn-in cycle completed — pit filler armed (run_pit_after_turnin)')
+    end
+    turn_in_was_matched = turn_in_matched_now
+
+    -- Inject ArkhamAsylumPlugin as filler when:
+    --   • setting on
+    --   • turn-in has happened at least once this session
+    --   • no real WarPlans plugin matched this tick (next(wants) == nil)
+    --   • no internal task is currently active (turn-in mid-flight, etc.)
+    -- Done AFTER preemption so a real WarPlans match always wins; the filler
+    -- only ever fills empty gaps.  When a new WarPlans quest arrives next
+    -- tick, the filler skips this block and the normal disable phase pulls
+    -- ArkhamAsylumPlugin out (deferred by its in_town_disable_when).
+    if settings.run_pit_after_turnin
+        and had_turn_in_complete
+        and next(wants) == nil
+    then
+        local any_task_active = false
+        for pattern, raw_entry in pairs(orchestrator.quest_plugin_map) do
+            if matches[pattern] then
+                local entry = normalize(raw_entry)
+                if entry.task then any_task_active = true; break end
+            end
+        end
+        if not any_task_active then
+            local arkham_entry
+            for _, raw in pairs(orchestrator.quest_plugin_map) do
+                local entry = normalize(raw)
+                if entry.plugin == 'ArkhamAsylumPlugin' then
+                    arkham_entry = entry
+                    break
+                end
+            end
+            if arkham_entry then
+                wants['ArkhamAsylumPlugin']          = arkham_entry
+                matched_reason['ArkhamAsylumPlugin'] = 'filler:run_pit_after_turnin'
+                -- Suppress the Tab+click teleport sequence for the filler:
+                -- the click target the user configured points at a WarPlans
+                -- quest icon and we have no quest active, so the click would
+                -- land on stale/empty UI.  Arkham handles its own teleport-
+                -- to-town-then-walk-to-pit-tower internally.
+                if teleport_pending then
+                    teleport_pending             = false
+                    teleport_incoming_first_seen = nil
+                    teleport_holding_logged      = false
+                end
+                if not pit_filler_active_logged then
+                    log('pit filler engaged — no WarPlans quest active, enabling ArkhamAsylumPlugin (teleport sequence skipped)')
+                    pit_filler_active_logged = true
+                end
+            end
+        elseif pit_filler_active_logged then
+            -- A task is now active (typically turn-in just appeared) — yield
+            -- the filler back so future cycles re-log on re-engage.
+            pit_filler_active_logged = false
+        end
+    elseif pit_filler_active_logged then
+        -- A real WarPlans plugin matched, or setting was turned off — log the yield.
+        log('pit filler yielding — WarPlans activity resumed')
+        pit_filler_active_logged = false
     end
 
     -- ── COLD-START TELEPORT ─────────────────────────────────────────────────
@@ -829,12 +930,20 @@ function orchestrator.tick()
             teleport_holding_logged      = false
             teleport_transition.state      = 'WAIT_TAB'
             teleport_transition.started_at = now
+            -- Capture the incoming plugin (if any) so the post-settle verifier
+            -- knows whether to enforce "must have left town".  Preemption has
+            -- already pruned `wants` to at most the highest-priority plugin.
+            local incoming
+            for plugin_name in pairs(wants) do incoming = plugin_name; break end
+            teleport_transition.incoming_plugin = incoming
+            teleport_transition.retry_count     = 0
             log(string.format(
-                'teleport transition started — Tab in %.1fs, click target=(%d, %d), settle=%.1fs',
+                'teleport transition started — Tab in %.1fs, click target=(%d, %d), settle=%.1fs%s',
                 TELEPORT_TAB_DELAY,
                 settings.teleport_click_x or 0,
                 settings.teleport_click_y or 0,
-                TELEPORT_SETTLE_DELAY))
+                TELEPORT_SETTLE_DELAY,
+                incoming and (' (incoming=' .. incoming .. ')') or ''))
         end
     end
     if teleport_transition.state == 'WAIT_TAB' then
@@ -878,8 +987,33 @@ function orchestrator.tick()
         end
     elseif teleport_transition.state == 'WAIT_SETTLE' then
         if (now - teleport_transition.started_at) >= TELEPORT_SETTLE_DELAY then
-            log('teleport transition: settled — releasing enable gate')
-            teleport_transition.state = 'IDLE'
+            -- Post-settle verification: for plugins that must NOT start in town
+            -- (e.g. Hordes), confirm we actually left town.  If still in town,
+            -- the click missed — retry the Tab+click sequence instead of
+            -- enabling the plugin in town.  Retry counter caps the loop so a
+            -- bad click target can't grind forever.
+            local incoming      = teleport_transition.incoming_plugin
+            local require_leave = incoming and TELEPORT_REQUIRE_LEAVE_TOWN[incoming]
+            local still_in_town = require_leave and in_town_disable_when()
+            if still_in_town and teleport_transition.retry_count < TELEPORT_RETRY_MAX then
+                teleport_transition.retry_count = teleport_transition.retry_count + 1
+                teleport_transition.state       = 'WAIT_TAB'
+                teleport_transition.started_at  = now
+                log(string.format(
+                    'teleport transition: settled but still in town — click missed, retrying Tab+click (attempt %d/%d) for %s',
+                    teleport_transition.retry_count, TELEPORT_RETRY_MAX, tostring(incoming)))
+            else
+                if still_in_town then
+                    log(string.format(
+                        'teleport transition: still in town after %d retries — giving up and releasing enable gate (%s will likely fail)',
+                        teleport_transition.retry_count, tostring(incoming)))
+                else
+                    log('teleport transition: settled — releasing enable gate')
+                end
+                teleport_transition.state           = 'IDLE'
+                teleport_transition.incoming_plugin = nil
+                teleport_transition.retry_count     = 0
+            end
         end
     end
 
@@ -978,10 +1112,16 @@ function orchestrator.release_all()
     teleport_pending      = false
     teleport_incoming_first_seen = nil
     teleport_holding_logged = false
-    teleport_transition.state      = 'IDLE'
-    teleport_transition.started_at = -math.huge
-    had_active_session    = false
-    recent_clicks         = {}
+    teleport_transition.state           = 'IDLE'
+    teleport_transition.started_at      = -math.huge
+    teleport_transition.incoming_plugin = nil
+    teleport_transition.retry_count     = 0
+    had_active_session       = false
+    -- Filler-pit state — re-arm only after the next session sees a turn-in.
+    turn_in_was_matched      = false
+    had_turn_in_complete     = false
+    pit_filler_active_logged = false
+    recent_clicks            = {}
 end
 
 function orchestrator.get_status_line()

@@ -23,7 +23,11 @@ local enums = {
     chest_types = {
         MATERIALS = "BSK_UniqueOpChest_Materials",
         GOLD = "BSK_UniqueOpChest_Gold",
-        GREATER_AFFIX = "BSK_UniqueOpChest_GreaterAffix"
+        GREATER_AFFIX = "BSK_UniqueOpChest_GreaterAffix",
+        -- WarPlans bonus chest, spawns alongside the regular chest set when the
+        -- corresponding WarPlans quest is active.  Opt-in via
+        -- settings.always_open_talisman_chest; if on, opened first (before GA).
+        TALISMAN = "Warplans_BSK_TalismanChest"
     },
     waypoints = {
         CERRIGAR = 0x76D58,

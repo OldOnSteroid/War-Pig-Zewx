@@ -83,7 +83,27 @@ local upgrade_glyphs = function (glyphs)
     task.status = status_enum['IDLE']
     tracker.glyph_done = true
 end
+-- When the user has Choron's Soul enabled AND a soul actor is present and
+-- still interactable, defer ALL glyph upgrades until the soul has been
+-- consumed.  Both consume the same resource (glyph upgrade chances) — running
+-- upgrade_glyph first would burn the pool the user explicitly chose to spend
+-- on XP.  Belt-and-suspenders backup for the task_manager priority order
+-- (consume_chorons_soul above upgrade_glyph) — if anything ever inverts that
+-- order, this gate still keeps the soul-first behaviour correct.
+local SOUL_ACTOR_NAME = 'Warplans_Pit_ChoronsSoul'
+local function soul_blocking()
+    if not settings.use_chorons_soul then return false end
+    local actors = actors_manager:get_all_actors()
+    for _, actor in pairs(actors) do
+        if actor:get_skin_name() == SOUL_ACTOR_NAME and actor:is_interactable() then
+            return true
+        end
+    end
+    return false
+end
+
 task.shouldExecute = function ()
+    if soul_blocking() then return false end
     local should_execute = not utils.is_looting() and
         settings.upgrade_toggle and
         utils.get_glyph_upgrade_gizmo() and

@@ -6,6 +6,7 @@ local settings = {
     enabled         = false,
     use_keybind     = false,
     use_teleport_transition = false,
+    run_pit_after_turnin = false,
     teleport_click_x = 0,
     teleport_click_y = 0,
     show_click_points = false,
@@ -17,6 +18,7 @@ settings.update_settings = function()
     settings.enabled        = gui.elements.main_toggle:get()
     settings.use_keybind    = gui.elements.use_keybind:get()
     settings.use_teleport_transition = gui.elements.use_teleport_transition:get()
+    settings.run_pit_after_turnin = gui.elements.run_pit_after_turnin:get()
 
     -- Keybind capture: when the user presses the bound key (default F5)
     -- while hovering an in-game target, capture the cursor's screen pixel

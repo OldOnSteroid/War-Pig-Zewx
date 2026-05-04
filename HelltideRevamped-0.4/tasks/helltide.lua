@@ -4,6 +4,7 @@ local settings = require "core.settings"
 local enums = require "data.enums"
 local perf = require "core.perf"
 local helltide_explorer = require "core.helltide_explorer"
+local zone_overrides = require "data.zone_overrides"
 
 local found_chest = nil
 local found_chest_position = nil -- cached position so we can navigate even when actor unloads
@@ -1137,9 +1138,14 @@ local helltide_task = {
     current_state = helltide_state.INIT,
 
     shouldExecute = function()
-        -- Also keep running when we've wandered out but helltide is still active
+        -- Also keep running when we've wandered out but helltide is still active.
+        -- Zone-override case (WarPigs auto-TP into a non-canonical zone): take
+        -- ownership during the helltide hour even before the buff lands so we
+        -- can walk to the entry vec3 instead of letting search_helltide fly us
+        -- back to a known town and undo the WarPigs teleport.
         return utils.is_in_helltide()
             or (returning_to_helltide and utils.helltide_active())
+            or (zone_overrides.get_current() ~= nil and utils.helltide_active())
     end,
 
     Execute = function(self)
@@ -1170,6 +1176,45 @@ local helltide_task = {
                 return
             end
         end
+
+        -- Zone-override walk-to-entry guard.  When WarPigs (or another external
+        -- trigger) drops us into a zone like Skov_Celestia where the standard
+        -- waypoint patrol can't run, we first walk to the override's entry vec3
+        -- so the helltide buff applies and there's something for Batmobile to
+        -- free-explore.  Once the buff is up, fall through to the normal flow
+        -- (which then hits the no_waypoint_region fallback).
+        local override = zone_overrides.get_current()
+        if override and not utils.is_in_helltide() then
+            local lp_pos = lp and lp:get_position()
+            local dist = lp_pos and lp_pos:dist_to(override.entry) or math.huge
+            if dist > 5 then
+                if not self._override_walk_logged then
+                    console.print(string.format(
+                        '[HELLTIDE] zone override active for "%s/%s" — walking to entry (%.1f,%.1f,%.1f), dist=%.1f',
+                        override.world_name, override.zone_name,
+                        override.entry:x(), override.entry:y(), override.entry:z(), dist))
+                    self._override_walk_logged = true
+                end
+                if BatmobilePlugin then
+                    BatmobilePlugin.pause(plugin_label)
+                    BatmobilePlugin.set_target(plugin_label, override.entry, false)
+                    bm_pulse(true)
+                end
+                return
+            end
+            -- Reached the entry but buff still not applied.  Park here instead
+            -- of wandering off — the buff usually appears within a second or
+            -- two of standing in the right cell.
+            self._override_walk_logged = false
+            clear_movement()
+            if BatmobilePlugin then
+                BatmobilePlugin.pause(plugin_label)
+            end
+            return
+        end
+        -- Buff is up (or no override) — clear the walk-logged flag so a future
+        -- buff drop logs the next walk attempt cleanly.
+        self._override_walk_logged = false
 
         -- Post-chest-open hold: keep the player parked on the loot for
         -- CHEST_POST_OPEN_PAUSE seconds so Looteer can pick everything up

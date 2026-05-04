@@ -40,7 +40,33 @@ local DEATH_PROXIMITY = 25
 -- currently visible. Past this, we stop pathing and fall through.
 local REMEMBERED_ARRIVAL = 5
 
-local long_path_target = nil
+-- Remembered-hunt suppression: when the player respawns far from the cached
+-- boss_position (typical: died at boss, revived at pit entrance, cached pos is
+-- deep on another floor), navigate_long_path keeps returning false and the
+-- task pauses Batmobile with no target — `[nav] no target, selecting new
+-- (prev=nil)` loops forever.  When we detect either consecutive long_path
+-- failures OR no-progress on the remembered approach, we yield to lower-
+-- priority tasks (portal / explore_pit / kill_monster) for a cooldown.  If
+-- the boss is still alive on this floor it'll come back into find_boss()'s
+-- 60-unit scan as we move; if it's gone we never re-engage.
+local REMEMBERED_HUNT_FAIL_THRESHOLD     = 3      -- consecutive long_path failures
+local REMEMBERED_HUNT_NO_PROGRESS_SECS   = 25     -- no improvement to dist
+local REMEMBERED_HUNT_COOLDOWN_SECS      = 60     -- suppression duration after give-up
+local REMEMBERED_HUNT_PROGRESS_DELTA     = 2.0    -- min meters of dist improvement to count as progress
+
+local long_path_target              = nil
+local remembered_hunt_fail_count    = 0
+local remembered_hunt_best_dist     = nil
+local remembered_hunt_progress_time = nil
+local remembered_hunt_giveup_time   = nil
+
+local function reset_remembered_hunt_state()
+    long_path_target              = nil
+    remembered_hunt_fail_count    = 0
+    remembered_hunt_best_dist     = nil
+    remembered_hunt_progress_time = nil
+    remembered_hunt_giveup_time   = nil
+end
 
 local function copy_vec3(v)
     return vec3:new(v:x(), v:y(), v:z())
@@ -115,16 +141,45 @@ task.shouldExecute = function ()
             tracker.boss_position = nil
             tracker.glyph_anchor_pos = nil
             tracker.boss_kill_time = nil
-            long_path_target = nil
+            reset_remembered_hunt_state()
         end
         return false
     end
     update_boss_state()
-    if tracker.boss_dead then return false end
-    -- Active hunt: boss visible right now.
-    if find_boss() then return true end
+    if tracker.boss_dead then
+        reset_remembered_hunt_state()
+        return false
+    end
+    -- Active hunt: boss visible right now.  Always wins — clear any active
+    -- suppression so the post-revive re-engagement is immediate when we
+    -- finally see the boss again.
+    if find_boss() then
+        if remembered_hunt_giveup_time ~= nil then
+            console.print('[kill_boss] boss visible again — clearing remembered-hunt suppression')
+        end
+        reset_remembered_hunt_state()
+        return true
+    end
     -- Remembered hunt: we've seen one and it's still alive somewhere on this floor.
-    if tracker.boss_seen and tracker.boss_position then return true end
+    if tracker.boss_seen and tracker.boss_position then
+        -- Suppression cooldown active (post-revive unreachable cache, etc.)
+        -- — yield to portal / explore_pit / kill_monster.  When the cooldown
+        -- expires we'll try the remembered hunt again from a fresh position.
+        if remembered_hunt_giveup_time
+            and (get_time_since_inject() - remembered_hunt_giveup_time) < REMEMBERED_HUNT_COOLDOWN_SECS
+        then
+            return false
+        end
+        -- Cooldown elapsed (or never set): clear it and resume the hunt.
+        if remembered_hunt_giveup_time then
+            console.print('[kill_boss] remembered-hunt suppression cooldown elapsed — re-engaging')
+            remembered_hunt_giveup_time   = nil
+            remembered_hunt_best_dist     = nil
+            remembered_hunt_progress_time = nil
+            remembered_hunt_fail_count    = 0
+        end
+        return true
+    end
     return false
 end
 
@@ -176,18 +231,64 @@ task.Execute = function ()
         local pos = tracker.boss_position
         local dist = utils.distance(local_player, pos)
         if dist > REMEMBERED_ARRIVAL then
+            local now = get_time_since_inject()
+
+            -- No-progress watchdog: track best-ever distance to remembered pos.
+            -- After a revive at the pit entrance with cached pos on a deep
+            -- floor, dist won't shrink because we can't actually path there.
+            if remembered_hunt_best_dist == nil
+                or dist < remembered_hunt_best_dist - REMEMBERED_HUNT_PROGRESS_DELTA
+            then
+                remembered_hunt_best_dist     = dist
+                remembered_hunt_progress_time = now
+            end
+            if remembered_hunt_progress_time
+                and (now - remembered_hunt_progress_time) > REMEMBERED_HUNT_NO_PROGRESS_SECS
+            then
+                console.print(string.format(
+                    '[kill_boss] no progress toward remembered boss pos for %ds (best=%.1f cur=%.1f) — suppressing remembered hunt for %ds',
+                    REMEMBERED_HUNT_NO_PROGRESS_SECS, remembered_hunt_best_dist, dist,
+                    REMEMBERED_HUNT_COOLDOWN_SECS))
+                remembered_hunt_giveup_time = now
+                BatmobilePlugin.stop_long_path(plugin_label)
+                BatmobilePlugin.clear_target(plugin_label)
+                BatmobilePlugin.resume(plugin_label)
+                long_path_target           = nil
+                remembered_hunt_fail_count = 0
+                return
+            end
+
             if long_path_target == nil
                 or utils.distance(pos, long_path_target) > 5
             then
                 local started = BatmobilePlugin.navigate_long_path(plugin_label, pos)
                 if started then
-                    long_path_target = copy_vec3(pos)
+                    long_path_target           = copy_vec3(pos)
+                    remembered_hunt_fail_count = 0
                 else
-                    -- Can't path there — give up on remembered hunt; let the
-                    -- next pulse re-evaluate. If boss truly is alive it'll
-                    -- come back into scan range as we move.
-                    console.print('[kill_boss] long_path to remembered boss pos failed')
+                    remembered_hunt_fail_count = remembered_hunt_fail_count + 1
+                    console.print(string.format(
+                        '[kill_boss] long_path to remembered boss pos failed (#%d/%d)',
+                        remembered_hunt_fail_count, REMEMBERED_HUNT_FAIL_THRESHOLD))
                     long_path_target = nil
+                    -- Consecutive-failure suppression: the cached pos is
+                    -- genuinely unreachable from here.  Yield to other tasks
+                    -- so the bot can make progress.
+                    if remembered_hunt_fail_count >= REMEMBERED_HUNT_FAIL_THRESHOLD then
+                        console.print(string.format(
+                            '[kill_boss] %d consecutive long_path failures — suppressing remembered hunt for %ds',
+                            REMEMBERED_HUNT_FAIL_THRESHOLD, REMEMBERED_HUNT_COOLDOWN_SECS))
+                        remembered_hunt_giveup_time = get_time_since_inject()
+                        BatmobilePlugin.stop_long_path(plugin_label)
+                        BatmobilePlugin.clear_target(plugin_label)
+                        BatmobilePlugin.resume(plugin_label)
+                        return
+                    end
+                    -- Below the failure threshold — don't pause+spin while
+                    -- waiting for the next attempt; let the navigator move
+                    -- with whatever target it had (or nothing) for this tick.
+                    BatmobilePlugin.resume(plugin_label)
+                    return
                 end
             end
             BatmobilePlugin.move(plugin_label)
@@ -200,7 +301,7 @@ task.Execute = function ()
             tracker.boss_kill_time = get_time_since_inject()
             tracker.glyph_anchor_pos = copy_vec3(pos)
             BatmobilePlugin.stop_long_path(plugin_label)
-            long_path_target = nil
+            reset_remembered_hunt_state()
             task.status = status_enum.ARRIVED_NO_BOSS
         end
     end

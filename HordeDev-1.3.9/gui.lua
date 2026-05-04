@@ -40,6 +40,7 @@ gui.elements = {
     path_angle_slider = slider_int:new(0, 360, 10, get_hash(plugin_label .. "path_angle_slider")), -- 10 is a default value
     chest_type_selector = combo_box:new(0, get_hash(plugin_label .. "chest_type_selector")),
     always_open_ga_chest = create_checkbox(true, "always_open_ga_chest"),
+    always_open_talisman_chest = create_checkbox(false, "always_open_talisman_chest"),
     merry_go_round = create_checkbox(true, "merry_go_round"),
     pick_pylon_delay = slider_float:new(1.5, 8.0, 1.5, get_hash(plugin_label .. "pick_pylon_delay")), -- 3.0 is the default value
     open_ga_chest_delay = slider_float:new(3, 10.0, 3.0, get_hash(plugin_label .. "open_ga_chest_delay")), -- 3.0 is the default value
@@ -104,6 +105,7 @@ function gui.render()
         gui.elements.exit_mode:render("Exit mode", gui.exit_mode, "Select reset or teleport to exit horde")
         gui.elements.merry_go_round:render("Circle arena when wave completes", "Toggle to circle arene when wave completes to pick up stray Aethers")
         gui.elements.always_open_ga_chest:render("Always Open GA Chest", "Toggle to always open Greater Affix chest when available")
+        gui.elements.always_open_talisman_chest:render("Always Open WarPlans Talisman Chest", "Open the WarPlans Talisman Chest (Warplans_BSK_TalismanChest) FIRST, before GA / selected. Only spawns when the WarPlans quest is active.")
         gui.elements.chest_type_selector:render("Select Chest Type", gui.chest_types_options, "Select the type of chest to open")
         gui.elements.salvage_toggle:render("Salvage", "Enable salvaging items")
         if gui.elements.salvage_toggle:get() then

@@ -3,6 +3,7 @@ local tracker = require "core.tracker"
 local helltide_task = require "tasks.helltide"
 local enums = require "data.enums"
 local settings = require "core.settings"
+local zone_overrides = require "data.zone_overrides"
 local plugin_label = "helltide_revamped"
 
 local current_city_index = 0
@@ -47,6 +48,11 @@ local search_helltide_task = {
     current_state = search_helltide_state.SEARCHING_HELLTIDE,
 
     shouldExecute = function()
+        -- Zone-override suppression: when WarPigs (or another external trigger)
+        -- has dropped us into a non-canonical helltide zone, the helltide task
+        -- owns the walk-to-entry handoff.  Letting search_helltide fire here
+        -- would teleport us back to a known town and undo the WarPigs TP.
+        if zone_overrides.get_current() then return false end
         return not utils.is_in_helltide()
     end,
 

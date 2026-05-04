@@ -2,6 +2,7 @@ local tracker = {
     finished_time = 0,
     pit_start_time = 0,
     ga_chest_opened = false,
+    talisman_chest_opened = false,
     selected_chest_opened = false,
     gold_chest_opened = false,
     finished_chest_looting = false,

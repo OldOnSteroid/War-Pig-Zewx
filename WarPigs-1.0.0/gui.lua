@@ -23,6 +23,7 @@ gui.elements = {
     -- map marker that initiates a teleport). The orchestrator waits for
     -- the teleport channel to settle before enabling the incoming plugin.
     use_teleport_transition = create_checkbox(false, 'use_teleport_transition'),
+    run_pit_after_turnin    = create_checkbox(false, 'run_pit_after_turnin'),
     show_click_points = create_checkbox(false, 'show_click_points'),
     -- 1920x1080 default is "no target set". Will be a no-op if both 0.
     teleport_click_x = slider_int:new(0, 3840, 0,
@@ -75,6 +76,12 @@ gui.render = function()
             'visually verify the position. Recent scripted clicks are also shown\n' ..
             'as a fading yellow circle for ~6s after firing.')
     end
+
+    gui.elements.run_pit_after_turnin:render('Run pit after turn-in',
+        'Once at least one WarPlans turn-in has completed, fill any gap with no\n' ..
+        'active WarPlans quest by enabling ArkhamAsylumPlugin (pit). The pit\n' ..
+        'keeps running until a new WarPlans quest matches, at which point the\n' ..
+        'normal preemption / disable_when handoff takes over.')
 
     gui.elements.verbose_logs:render('Verbose logs', 'Print WarPlans quest diffs to console')
     gui.elements.log_all_quests:render('Log ALL quests', 'Print every newly-seen quest name + id to console (use to capture quest names for new activities)')
