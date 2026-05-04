@@ -33,38 +33,45 @@ local TELEPORT_TAB_DELAY    = 0.5
 local TELEPORT_CLICK_DELAY  = 1.5
 local TELEPORT_SETTLE_DELAY = 5.0
 local TELEPORT_VK_TAB       = 0x09
+-- Hold time AFTER the incoming activity first appears in the matched set.
+-- Stops us from pressing Tab the same tick the previous WarPlan unmatched —
+-- the next WarPlan (e.g. TurnIn) typically lands ~1 second later, and the
+-- in-game quest panel needs a moment to redraw with its entry before our
+-- pixel-targeted click can hit it. 2.5s comfortably covers the 1-1.5s
+-- spawn delay seen in logs (Helltide → TurnIn ≈ 1.0s) plus UI render.
+local TELEPORT_INCOMING_SETTLE = 2.5
 
 -- Predicates that gate the START of the teleport sequence. teleport_pending
 -- can be armed long before any of these pass; we hold the sequence until
 -- they're all true so we don't Tab/click while the player is still mid-
--- loot-or-salvage cleanup.
---   * in_town_attribute(): out of dungeon, no monsters.
---   * Alfred idle: AlfredTheButlerPlugin (if loaded) reports all_task_done
---     so an in-progress salvage/sell/restock isn't interrupted.
-local function in_town_attribute_for_teleport()
-    local lp = get_local_player()
-    if not lp then return false end
-    if not _G.attributes or _G.attributes.PLAYER_IN_TOWN_LEVEL_AREA == nil then
-        return true  -- attribute missing — fail-open so we don't deadlock
-    end
-    local ok, val = pcall(function()
-        return lp:get_attribute(attributes.PLAYER_IN_TOWN_LEVEL_AREA) == 1
-    end)
-    return ok and val == true
-end
+-- loot-or-salvage cleanup OR before the next quest's panel entry exists.
+--
+-- We deliberately do NOT gate on in_town_attribute: HelltideRevamped doesn't
+-- auto-teleport to town when its quest unmatches, so requiring "in town"
+-- would deadlock the helltide → turn-in handoff. The user's spec is "click
+-- teleports to the quest from anywhere" — the click itself does the
+-- traveling — so being in town isn't a precondition.
 
 local function alfred_idle()
     local alfred = _G.AlfredTheButlerPlugin
     if not alfred or type(alfred.get_status) ~= 'function' then return true end
     local ok, s = pcall(alfred.get_status)
     if not ok or type(s) ~= 'table' then return true end
-    -- Not enabled = nothing to wait on. Enabled but all_task_done = idle.
+    -- Not enabled = nothing to wait on.
     if not s.enabled then return true end
-    return s.all_task_done == true
-end
-
-local function is_safe_to_teleport()
-    return in_town_attribute_for_teleport() and alfred_idle()
+    -- Paused-by-another-plugin (external_pause=true) means Alfred is held
+    -- idle by some prior plugin (e.g. HelltideRevamped paused Alfred while
+    -- it ran helltide; HR doesn't resume on disable, so Alfred sits paused
+    -- forever). Paused = not actively doing work, safe for our teleport.
+    if s.paused then return true end
+    -- trigger_tasks is the live "Alfred is processing its queue" flag —
+    -- Alfred's status task sets it true when there's work pending and
+    -- clears it when the queue completes. Don't use all_task_done here:
+    -- that flag is initially false on cold start (only flips true AFTER
+    -- Alfred runs at least one full cycle), so on a fresh launch with
+    -- nothing for Alfred to do it gates us forever.
+    if s.trigger_tasks then return false end
+    return true
 end
 
 local teleport_transition = {
@@ -84,9 +91,13 @@ local teleport_transition = {
 -- still has chests to open and loot to salvage. Triggering on the new
 -- pattern's match would interrupt that cleanup and lose the loot.
 local teleport_pending = false
--- Suppresses repeat "teleport holding — in_town=… alfred_idle=…" logs while
--- the sequence is waiting for its safety predicates. Cleared the moment we
--- transition out of IDLE.
+-- Tracks when the *incoming* activity (next plugin or task) first matched
+-- after teleport_pending was armed. We need to wait TELEPORT_INCOMING_SETTLE
+-- past this point before pressing Tab so the in-game quest panel renders the
+-- new entry before we click. Cleared when a sequence starts or aborts.
+local teleport_incoming_first_seen = nil
+-- Suppresses repeat "teleport holding — …" logs while the sequence is
+-- waiting for its predicates. Cleared the moment we transition out of IDLE.
 local teleport_holding_logged = false
 -- Tracks whether ANY plugin/task has been active under this WarPigs session.
 -- False until the first activity starts; switched true on first activation
@@ -540,8 +551,49 @@ local function get_managed_plugins()
     return set
 end
 
+-- Death-handling state: log "died" once on transition so respawn loops don't
+-- spam.  Cleared the moment is_dead() goes false.
+local was_dead          = false
+
 function orchestrator.tick()
     if settings.log_all_quests then dump_all_quests() end
+
+    -- Death recovery — handle this before any other state, in case the player
+    -- got killed during the Tab→click→settle teleport sequence (mob aggro on
+    -- the way out of town, late-arriving boss attack, etc).  When dead we
+    --   (1) abort any in-flight transition + re-arm so it restarts after
+    --       respawn — the click was either lost or fired into a death screen,
+    --   (2) call revive_at_checkpoint() each tick until it takes,
+    --   (3) early-return so the orchestrator doesn't try to drive plugins
+    --       while the player is on the death screen.
+    local lp = get_local_player()
+    if lp and lp:is_dead() then
+        if not was_dead then
+            log('player died — aborting any in-flight transition and reviving')
+            was_dead = true
+        end
+        if teleport_transition.state ~= 'IDLE' then
+            log('died mid-transition (state=' .. teleport_transition.state ..
+                ') — re-arming teleport sequence for after respawn')
+            teleport_transition.state      = 'IDLE'
+            teleport_transition.started_at = -math.huge
+            teleport_pending               = true
+            teleport_incoming_first_seen   = nil
+            teleport_holding_logged        = false
+        elseif settings.use_teleport_transition and not teleport_pending then
+            -- Death outside an active transition still likely cancelled any
+            -- in-progress in-game teleport channel (common when a mob hits
+            -- you during the 3-5s teleport cast).  Arm the sequence so we
+            -- redo the Tab+click after respawn lands us at the checkpoint.
+            teleport_pending = true
+        end
+        revive_at_checkpoint()
+        return
+    end
+    if was_dead then
+        log('player revived — resuming orchestrator')
+        was_dead = false
+    end
 
     -- Always sample Reaper kill state, even when no boss quest is currently
     -- matched, so reaper_kill_disable_when() has accurate data the moment a
@@ -565,15 +617,18 @@ function orchestrator.tick()
         if entry.task then
             -- Task entries are stateful internally; just signal active/idle.
             -- They do NOT participate in plugin ownership tracking.
-            -- While our teleport sequence is mid-flight, hold the task in
-            -- "inactive" so it doesn't fire its own teleport / actions and
-            -- compete with the orchestrator-driven Tab+Click. Once the
-            -- sequence settles back to IDLE, the next tick passes
-            -- matched=true and the task picks up normally (e.g. turn-in
-            -- task transitions IDLE → APPROACH_NPC since the orchestrator
-            -- just landed us in town).
+            -- While our teleport sequence is mid-flight OR pending (waiting
+            -- for settle/alfred prerequisites), hold the task in "inactive"
+            -- so it doesn't fire its own teleport / actions and compete
+            -- with the orchestrator-driven Tab+Click. Once the sequence
+            -- fully completes (state IDLE AND pending cleared), the next
+            -- tick passes matched=true and the task picks up normally
+            -- (e.g. turn-in task transitions IDLE → APPROACH_NPC since the
+            -- orchestrator just landed us in town).
             local task_matched = matched
-            if matched and teleport_transition.state ~= 'IDLE' then
+            if matched
+                and (teleport_transition.state ~= 'IDLE' or teleport_pending)
+            then
                 task_matched = false
             end
             local ok, err = pcall(entry.task.tick, task_matched)
@@ -724,23 +779,54 @@ function orchestrator.tick()
         and teleport_pending
         and teleport_transition.state == 'IDLE'
     then
-        if not is_safe_to_teleport() then
-            -- Hold pending: previous activity hasn't fully wrapped up yet
-            -- (still in dungeon collecting chest loot, or Alfred is mid-
-            -- salvage). teleport_pending stays true, we'll re-check next
-            -- tick. Log once when we first start holding so the user can
-            -- see *why* nothing is happening.
-            if not teleport_holding_logged then
-                local in_town = in_town_attribute_for_teleport()
-                local alfred_done = alfred_idle()
-                log(string.format(
-                    'teleport holding — in_town=%s alfred_idle=%s (waiting for cleanup)',
-                    tostring(in_town), tostring(alfred_done)))
-                teleport_holding_logged = true
+        -- Resolve "incoming activity": a wanted plugin OR a matched task
+        -- entry. We'll only press Tab after one exists AND has been visible
+        -- to the orchestrator for TELEPORT_INCOMING_SETTLE — that gives the
+        -- in-game quest panel time to render the new entry before our
+        -- pixel-targeted click fires. Without this, Helltide → TurnIn
+        -- pressed Tab BEFORE the TurnIn quest had even appeared, so the
+        -- click landed on stale (empty) UI and we stayed in helltide.
+        local has_incoming = next(wants) ~= nil
+        if not has_incoming then
+            for pattern, raw_entry in pairs(orchestrator.quest_plugin_map) do
+                if matches[pattern] then
+                    local entry = normalize(raw_entry)
+                    if entry.task then has_incoming = true; break end
+                end
+            end
+        end
+        if not has_incoming then
+            teleport_incoming_first_seen = nil
+        elseif teleport_incoming_first_seen == nil then
+            teleport_incoming_first_seen = now
+            log(string.format('teleport: incoming activity matched, settling for %.1fs',
+                TELEPORT_INCOMING_SETTLE))
+        end
+        local incoming_settled = teleport_incoming_first_seen
+            and (now - teleport_incoming_first_seen) >= TELEPORT_INCOMING_SETTLE
+        local alfred_done = alfred_idle()
+
+        local ready = has_incoming and incoming_settled and alfred_done
+        if not ready then
+            -- Log once with the current blocker(s) so the user can see WHY
+            -- the sequence is held. Re-emit only when the reason changes.
+            local reason
+            if not has_incoming then
+                reason = 'no incoming activity yet'
+            elseif not alfred_done then
+                reason = 'Alfred busy (loot/salvage in progress)'
+            else
+                local left = TELEPORT_INCOMING_SETTLE - (now - teleport_incoming_first_seen)
+                reason = string.format('settling incoming (%.1fs left)', left)
+            end
+            if teleport_holding_logged ~= reason then
+                log('teleport holding — ' .. reason)
+                teleport_holding_logged = reason
             end
         else
-            teleport_pending          = false
-            teleport_holding_logged   = false
+            teleport_pending             = false
+            teleport_incoming_first_seen = nil
+            teleport_holding_logged      = false
             teleport_transition.state      = 'WAIT_TAB'
             teleport_transition.started_at = now
             log(string.format(
@@ -812,6 +898,14 @@ function orchestrator.tick()
     if not gate_reason and teleport_transition.state ~= 'IDLE' then
         gate_reason = 'teleport transition: ' .. teleport_transition.state
     end
+    -- Also gate while teleport_pending is true but the sequence hasn't
+    -- started yet (state still IDLE because we're waiting for incoming /
+    -- settle / alfred_idle). Without this, cold-start enables fire BEFORE
+    -- the Tab+click runs because the state-machine hasn't transitioned out
+    -- of IDLE yet.
+    if not gate_reason and teleport_pending then
+        gate_reason = 'teleport pending (waiting for prerequisites)'
+    end
     if not gate_reason then
         for p, t in pairs(last_disable_time) do
             local age = now - t
@@ -882,6 +976,7 @@ function orchestrator.release_all()
     enable_blocked        = {}
     last_enabled_reason   = {}
     teleport_pending      = false
+    teleport_incoming_first_seen = nil
     teleport_holding_logged = false
     teleport_transition.state      = 'IDLE'
     teleport_transition.started_at = -math.huge

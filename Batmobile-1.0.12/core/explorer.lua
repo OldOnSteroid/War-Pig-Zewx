@@ -33,7 +33,59 @@ local explorer = {
     -- this set the frontier table accumulates every walkable cell the player
     -- passed near but >12 units from, growing without bound.
     scanned = {},
+    -- Aliased by navigator on load to its own `failed_directions` list.  Each
+    -- entry: { origin_x, origin_y, x, y (unit vector), time, target_dist }.
+    -- Used by direction_penalty() to demote frontier candidates pointing into
+    -- recently-failed bearings — see select_node_distance / select_node_direction.
+    failed_directions = nil,
 }
+
+-- Direction-failure penalty tunables.  The penalty subtracts from a candidate's
+-- distance score (or adds to its direction-diff score), pushing the selector
+-- away from frontiers behind known walls / unreachable clusters.
+local FAILED_DIR_PROXIMITY      = 25                       -- only apply if origin within this dist
+local FAILED_DIR_HALF_ANGLE_COS = math.cos(math.rad(45))   -- ~45° cone — wider than typical doorway
+local FAILED_DIR_MAX_PENALTY    = 60                       -- max distance-units of penalty (frontier_max_dist=40)
+local FAILED_DIR_TTL            = 25                       -- mirror navigator.failed_direction_ttl
+
+-- Compute a non-negative penalty for picking `node` from `from_pos`, based on
+-- recent failed-direction entries.  Stronger when the candidate's direction is
+-- closely aligned with the failed bearing, when the failure is recent, and when
+-- the failure originated near the current position.
+local function direction_penalty(node, from_pos)
+    local list = explorer.failed_directions
+    if not list or #list == 0 then return 0 end
+    local dx = node:x() - from_pos:x()
+    local dy = node:y() - from_pos:y()
+    local len = math.sqrt(dx*dx + dy*dy)
+    if len < 0.001 then return 0 end
+    local nx, ny = dx / len, dy / len
+    local now = (get_time_since_inject and get_time_since_inject()) or 0
+    local px, py = from_pos:x(), from_pos:y()
+    local penalty = 0
+    for i = 1, #list do
+        local d = list[i]
+        local age = now - d.time
+        if age < FAILED_DIR_TTL then
+            local odx = px - d.origin_x
+            local ody = py - d.origin_y
+            local origin_dist_sq = odx*odx + ody*ody
+            if origin_dist_sq < FAILED_DIR_PROXIMITY * FAILED_DIR_PROXIMITY then
+                local sim = nx * d.x + ny * d.y
+                if sim >= FAILED_DIR_HALF_ANGLE_COS then
+                    -- Map sim ∈ [cos(45°), 1] → strength ∈ [0, 1]
+                    local strength    = (sim - FAILED_DIR_HALF_ANGLE_COS) / (1 - FAILED_DIR_HALF_ANGLE_COS)
+                    local age_factor  = 1 - (age / FAILED_DIR_TTL)
+                    local prox_factor = 1 - (math.sqrt(origin_dist_sq) / FAILED_DIR_PROXIMITY)
+                    local p = FAILED_DIR_MAX_PENALTY * strength * age_factor * prox_factor
+                    if p > penalty then penalty = p end
+                end
+            end
+        end
+    end
+    return penalty
+end
+explorer.direction_penalty = direction_penalty
 -- Spatial index for fast bbox queries during eviction.  Without this, the
 -- evict pass iterates all 6000+ frontiers per call to find ~50 in the scan box.
 -- Bucket size tuned to scan box (~26 units): one query touches ~4 buckets.
@@ -291,13 +343,17 @@ local select_node_distance = function ()
     local check_pos = explorer.backtrack[1] or explorer.cur_pos
     local cur_dist = utils.distance(explorer.cur_pos, check_pos)
 
-    -- check perimeter and frontier for furthest if not backtracking
+    -- check perimeter and frontier for furthest if not backtracking.
+    -- Score = distance_from_check - direction_penalty.  The penalty pushes
+    -- selection away from candidates pointing into recently-failed bearings,
+    -- so we don't keep choosing the same wall-blocked frontier.
     if explorer.wrong_dir_count <= 2 then
         for _, p_node in ipairs(perimeter) do
-            local dist = utils.distance(p_node, check_pos)
-            if furthest_node == nil or dist > furthers_dist then
+            local dist  = utils.distance(p_node, check_pos)
+            local score = dist - direction_penalty(p_node, explorer.cur_pos)
+            if furthest_node == nil or score > furthers_dist then
                 furthest_node = p_node
-                furthers_dist = dist
+                furthers_dist = score
             end
         end
         if furthers_dist ~= nil and furthers_dist < cur_dist then
@@ -316,10 +372,11 @@ local select_node_distance = function ()
                     remove_frontier(most_recent_str)
                 else
                     local frontier_node = explorer.frontier_node[most_recent_str]
-                    local dist = utils.distance(frontier_node, check_pos)
-                    if furthest_node == nil or dist > furthers_dist then
+                    local dist  = utils.distance(frontier_node, check_pos)
+                    local score = dist - direction_penalty(frontier_node, explorer.cur_pos)
+                    if furthest_node == nil or score > furthers_dist then
                         furthest_node = frontier_node
-                        furthers_dist = dist
+                        furthers_dist = score
                         furthest_node_str = most_recent_str
                     end
                 end
@@ -402,7 +459,11 @@ local select_node_direction = function (failed)
             for _, p_node in ipairs(perimeter) do
                 local dx = p_node:x() - check_pos:x()
                 local dy = p_node:y() - check_pos:y()
+                -- diff is L1 direction-error (lower=better); add penalty so a
+                -- candidate pointing into a recently-failed bearing scores worse
+                -- than a slightly-less-aligned but reachable alternative.
                 local diff = math.abs(dx - last_dx) + math.abs(dy - last_dy)
+                            + direction_penalty(p_node, explorer.cur_pos)
                 if closest_dir_diff == nil or closest_dir_diff > diff then
                     closest_dir_diff = diff
                     closest_dir_node = p_node
@@ -424,27 +485,38 @@ local select_node_direction = function (failed)
         return perimeter[1]
     end
 
-    -- if no unvisited perimeter, try to find an unexplored node in frontier within distance
+    -- if no unvisited perimeter, find the lowest-penalty in-range frontier
+    -- (was: first-in-range; now picks among all in-range to avoid favouring
+    -- a candidate that points into a known-failed bearing).
+    local best_str, best_node, best_penalty
     local index = explorer.frontier_index
     while index >= 0 do
         local most_recent_str = explorer.frontier_order[index]
         if most_recent_str ~= nil then
-            -- skip if node is visited
             if explorer.visited[most_recent_str] ~= nil then
                 remove_frontier(most_recent_str)
             else
                 local frontier_node = explorer.frontier_node[most_recent_str]
                 if utils.distance(frontier_node, explorer.cur_pos) <= explorer.frontier_max_dist then
-                    remove_frontier(most_recent_str)
-                    explorer.backtracking = false
-                    local dx = frontier_node:x() - explorer.cur_pos:x()
-                    local dy = frontier_node:y() - explorer.cur_pos:y()
-                    explorer.last_dir = {dx, dy}
-                    return frontier_node
+                    local p = direction_penalty(frontier_node, explorer.cur_pos)
+                    if best_node == nil or p < best_penalty then
+                        best_node    = frontier_node
+                        best_str     = most_recent_str
+                        best_penalty = p
+                        if p == 0 then break end  -- can't beat zero-penalty pick
+                    end
                 end
             end
         end
         index = index - 1
+    end
+    if best_node ~= nil then
+        remove_frontier(best_str)
+        explorer.backtracking = false
+        local dx = best_node:x() - explorer.cur_pos:x()
+        local dy = best_node:y() - explorer.cur_pos:y()
+        explorer.last_dir = {dx, dy}
+        return best_node
     end
     -- Backtrack to discover new frontiers — moving back triggers update() which
     -- scans the surrounding area and may find unexplored walkable nodes

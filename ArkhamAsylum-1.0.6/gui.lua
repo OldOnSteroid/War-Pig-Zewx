@@ -68,6 +68,7 @@ gui.elements = {
     exit_mode = combo_box:new(0, get_hash(plugin_label .. '_' .. 'exit_mode')),
     return_for_loot = create_checkbox(true, 'return_for_loot'),
     upgrade_toggle = create_checkbox(true, 'upgrade_toggle'),
+    use_chorons_soul = create_checkbox(false, 'use_chorons_soul'),
     upgrade_mode = combo_box:new(1, get_hash(plugin_label .. '_' .. 'upgrade_mode')),
     upgrade_threshold = slider_int:new(1, 100, 1, get_hash('upgrade_threshold')),
     upgrade_legendary_toggle = create_checkbox(true, plugin_label .. '_' .. 'upgrade_legendary_toggle'),
@@ -144,6 +145,9 @@ gui.render = function ()
             gui.elements.maximum_glyph_level:render('Maximum level', 'Only upgrade glyphs with level less than or equal to this value')
             gui.elements.upgrade_legendary_toggle:render('Upgrade to legendary glyph', 'Disable this to save gem fragments')
         end
+        gui.elements.use_chorons_soul:render("Use Choron's Soul",
+            "After the boss dies, interact with the Choron's Soul actor to consume " ..
+            "remaining glyph upgrade chances for experience.")
         gui.elements.pit_settings_tree:pop()
     end
     if gui.elements.party_settings_tree:push('Party Settings') then

@@ -52,6 +52,16 @@ local navigator = {
     -- traversal-route attempt doesn't re-fire every tick.
     last_trav_route_attempt_time = -1,
 
+    -- Direction-failure history: every time we abandon a target (partial-path stall
+    -- or N consecutive A* failures) we record a unit vector from the player to that
+    -- target along with origin pos and timestamp.  The explorer reads this list and
+    -- penalizes future frontier candidates whose direction-from-player overlaps a
+    -- recently failed direction, biasing selection toward reachable areas instead
+    -- of repeatedly wall-pushing toward the same dead zone.
+    failed_directions             = {},
+    failed_direction_ttl          = 25,   -- seconds — stale entries are dropped on next push
+    failed_direction_max_history  = 12,   -- cap to bound iteration cost in scorer
+
     -- ────────────────────────────────────────────────────────────────────────
     -- Trap detection / recovery
     -- See update_trap_state() / attempt_escape() at the bottom of this file.
@@ -98,6 +108,11 @@ local TRAP_GIVEUP_TIMEOUT   = 60    -- seconds in trapped state before giving_up
 local TRAV_HISTORY_MAX      = 5     -- recent traversals to consider for direction
 local TRAV_TRAP_BL_DURATION = 300   -- seconds to long-blacklist trap re-entry gizmos
 local TRAP_POST_ESCAPE_GRACE = 15   -- seconds to keep trap active after escape routes
+
+-- Wire up failed-direction sharing once at module load.  The explorer reads this
+-- list during frontier scoring; navigator.record_failed_direction reassigns the
+-- table on each push so we keep the alias in sync there.
+explorer.failed_directions = navigator.failed_directions
 
 -- Combined check: returns true if a traversal is blacklisted by either the
 -- short-term (15s) post-crossing list OR the long-term trap-escape list.
@@ -642,10 +657,64 @@ navigator.reset_movement = function ()
     navigator.partial_target_last_progress_time = -1
     navigator.last_trav_route_attempt_time = -1
 end
+
+-- record_failed_direction: called whenever we abandon a target (partial-path
+-- no-progress stall, or N consecutive A* failures).  Stores the unit vector
+-- player→target plus the player's position at time of failure, with a TTL.
+-- The explorer reads `explorer.failed_directions` (alias of this list) to
+-- demote frontier candidates pointing into known-bad directions.
+navigator.record_failed_direction = function (player_pos, target_pos)
+    if not player_pos or not target_pos then return end
+    local dx = target_pos:x() - player_pos:x()
+    local dy = target_pos:y() - player_pos:y()
+    local len = math.sqrt(dx*dx + dy*dy)
+    if len < 0.001 then return end
+    local nx, ny = dx / len, dy / len
+
+    local now = get_time_since_inject()
+    local kept = {}
+    for _, d in ipairs(navigator.failed_directions) do
+        if now - d.time < navigator.failed_direction_ttl then
+            kept[#kept + 1] = d
+        end
+    end
+
+    -- Coalesce: if a near-duplicate (same origin within 10u, same direction within ~25°)
+    -- already exists, just refresh its timestamp instead of growing the list.
+    for _, d in ipairs(kept) do
+        local odx = player_pos:x() - d.origin_x
+        local ody = player_pos:y() - d.origin_y
+        if odx*odx + ody*ody < 100 and (nx*d.x + ny*d.y) > 0.9 then
+            d.time = now
+            navigator.failed_directions = kept
+            explorer.failed_directions  = kept
+            return
+        end
+    end
+
+    kept[#kept + 1] = {
+        origin_x = player_pos:x(),
+        origin_y = player_pos:y(),
+        x = nx, y = ny,
+        time = now,
+        target_dist = len,
+    }
+    while #kept > navigator.failed_direction_max_history do
+        table.remove(kept, 1)
+    end
+    navigator.failed_directions = kept
+    explorer.failed_directions  = kept
+    console.print(string.format(
+        '[nav] failed direction recorded dir=(%.2f,%.2f) origin=(%.1f,%.1f) dist=%.1f count=%d',
+        nx, ny, player_pos:x(), player_pos:y(), len, #kept))
+end
+
 navigator.reset = function ()
     utils.log(1, 'reseting')
     explorer.reset()
     navigator.reset_movement()
+    navigator.failed_directions = {}
+    explorer.failed_directions  = navigator.failed_directions
     navigator.exploration_resets = 0
     -- Wall-ring penalty is cached against the static walkable grid; a full
     -- reset implies map/zone change, so the cache may be stale.
@@ -1238,7 +1307,10 @@ navigator.move = function ()
         and navigator.last_trav == nil
         and navigator.trav_escape_pos == nil
         and navigator.partial_target_ref == navigator.target
-        and (get_time_since_inject() - navigator.partial_target_last_progress_time) > 3
+        -- Must fire before the 2.5s no-progress abandonment so pits with
+        -- climb-up traversals get a chance to route through them instead of
+        -- abandoning the target outright.
+        and (get_time_since_inject() - navigator.partial_target_last_progress_time) > 1.5
         and (get_time_since_inject() - navigator.last_trav_route_attempt_time) > 2
     then
         navigator.last_trav_route_attempt_time = get_time_since_inject()
@@ -1284,21 +1356,28 @@ navigator.move = function ()
                 navigator.partial_target_ref = navigator.target
                 navigator.partial_target_best_dist = dist_to_target
                 navigator.partial_target_last_progress_time = now
-            elseif dist_to_target < navigator.partial_target_best_dist - 1 then
+            elseif dist_to_target < navigator.partial_target_best_dist - 2 then
                 navigator.partial_target_best_dist = dist_to_target
                 navigator.partial_target_last_progress_time = now
-            elseif now - navigator.partial_target_last_progress_time > 4
+            elseif now - navigator.partial_target_last_progress_time > 2.5
                 and navigator.last_trav == nil
             then
-                console.print('[nav] partial-path no progress for 4s (best=' ..
+                console.print('[nav] partial-path no progress for 2.5s (best=' ..
                     string.format('%.1f', navigator.partial_target_best_dist) ..
                     ' cur=' .. string.format('%.1f', dist_to_target) ..
                     ') — abandoning unreachable target ' .. utils.vec_to_string(navigator.target))
+                -- Record failed direction for future frontier scoring (works for
+                -- both custom and explorer targets without touching explorer.visited).
+                navigator.record_failed_direction(player_pos, navigator.target)
                 if navigator.paused then
-                    -- Custom target (kill_monster etc.): mark unreachable via failed_target
+                    -- Custom target (kill_monster, HR patrol etc.): mark unreachable.
+                    -- Wider radius (25) than the N-fail path (15): partial-path stall
+                    -- means the area is genuinely far / behind a wall, so we want
+                    -- callers like HR patrol to skip the entire waypoint cluster
+                    -- when they re-set, not just the exact node.
                     navigator.failed_target = navigator.target
                     navigator.failed_target_time = now
-                    navigator.failed_target_radius = 15
+                    navigator.failed_target_radius = 25
                 else
                     -- Explorer target: marking just the exact node leaves adjacent
                     -- frontiers in the same unreachable cluster, so select_target
@@ -1415,6 +1494,10 @@ navigator.move = function ()
                 if routed then
                     return  -- don't set failed_target — retry after crossing
                 end
+                -- Record failed direction so the explorer biases away from this
+                -- bearing on the next pick (works for custom targets too — no
+                -- explorer.visited mutation, just a scoring penalty).
+                navigator.record_failed_direction(player_pos, navigator.target)
                 -- If paused (external caller like kill_monster set target), just mark
                 -- as unreachable and clear — do NOT blacklist explorer.visited since
                 -- the explorer didn't pick this target and blacklisting corrupts its state

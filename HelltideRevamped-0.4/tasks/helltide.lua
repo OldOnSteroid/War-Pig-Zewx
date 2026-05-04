@@ -138,6 +138,16 @@ local was_in_helltide_for_arm  = false  -- tracks the previous-tick is_in_hellti
 -- one.  Tracked so we don't fire the bail-out repeatedly on consecutive ticks.
 local force_zone_change = false  -- HR sets when Batmobile gives up; cleared on reset/zone-change
 
+-- No-waypoints fallback: WarPigs (and potentially other external triggers) can
+-- teleport us into a Helltide zone whose `region` prefix isn't in
+-- `enums.helltide_tps` (e.g. `Skov_Celestia`).  In that case
+-- `check_and_load_waypoints()` is a no-op, `tracker.waypoints` stays empty,
+-- and the state machine pingpongs INIT ↔ EXPLORE_HELLTIDE.  When detected, we
+-- fall back to the experimental_explorer's grid-coverage so we can still farm
+-- the zone with no waypoint file.  Cleared on reset / zone re-entry.
+local no_waypoint_region        = false
+local no_waypoint_logged_zone   = nil   -- last zone string we logged the fallback for, to dedup spam
+
 
 local TRAVERSAL_RECOVERY_TIMEOUT  = 10 -- seconds in free-explore before clearing traversal blacklist (increased: Batmobile now handles traversals via partial paths + destination-aware selection)
 local TRAVERSAL_RECOVERY_COOLDOWN = 20 -- minimum seconds between recovery attempts
@@ -714,13 +724,17 @@ local function load_waypoints(file)
     end
 end
 
+-- Returns true when a region match was found and waypoints were loaded.
+-- False means the current zone has no waypoint file (caller should fall back
+-- to grid-coverage exploration instead of bouncing INIT ↔ EXPLORE_HELLTIDE).
 local function check_and_load_waypoints()
     for _, tp in ipairs(enums.helltide_tps) do
         if utils.player_in_region(tp.region) then
             load_waypoints(tp.file)
-            return
+            return true
         end
     end
+    return false
 end
 
 local function randomize_waypoint(waypoint, max_offset)
@@ -1190,6 +1204,11 @@ local helltide_task = {
                 BatmobilePlugin.clear_giving_up(plugin_label)
             end
             force_zone_change = false
+            -- Re-evaluate the no-waypoint fallback for the new zone — the next
+            -- INIT pass will set it back to true if this zone also has no
+            -- waypoint file, or leave it false for a known-region zone.
+            no_waypoint_region = false
+            no_waypoint_logged_zone = nil
         end
         was_in_helltide_for_arm = in_ht_now
 
@@ -1292,7 +1311,24 @@ local helltide_task = {
     end,
 
     initiate_waypoints = function(self)
-        check_and_load_waypoints()
+        local matched = check_and_load_waypoints()
+        if not matched then
+            -- Unknown region (no waypoint file).  We can't run waypoint patrol or the
+            -- grid-coverage explorer (it builds its bbox from the waypoints), so
+            -- mark the session as "let Batmobile free-explore" and stop bouncing
+            -- INIT ↔ EXPLORE_HELLTIDE.  check_events still drives interactables
+            -- (chests/ore/herbs/shrine/goblin/pyre/monsters) via actor scans —
+            -- only the wander-between-events movement source changes.
+            no_waypoint_region = true
+            local zname = get_current_world() and get_current_world():get_current_zone_name() or "?"
+            if no_waypoint_logged_zone ~= zname then
+                console.print('[HELLTIDE] no waypoint file for zone "' .. tostring(zname) ..
+                    '" — falling back to Batmobile free-explore for this session')
+                no_waypoint_logged_zone = zname
+            end
+        else
+            no_waypoint_region = false
+        end
         last_target_ni = nil
         self.current_state = helltide_state.EXPLORE_HELLTIDE
     end,
@@ -1417,7 +1453,8 @@ local helltide_task = {
     end,
 
     explore_helltide = function(self)
-        if #tracker.waypoints == 0 then
+        if #tracker.waypoints == 0 and not no_waypoint_region then
+            -- Truly empty (not yet initialised) — head back to INIT to load.
             self.current_state = helltide_state.INIT
             return
         end
@@ -1450,6 +1487,16 @@ local helltide_task = {
         -- on the same target, hitting the time cap repeatedly.  The long_path module
         -- assumes it's the sole driver of navigator state (main.lua's debug handler);
         -- co-driving from HR breaks that contract.  Reverted to navigate_to.
+        -- No-waypoints fallback: hand off to Batmobile's own explorer.  Done
+        -- BEFORE the experimental_explorer block because that block depends on
+        -- waypoints to build its grid (build_grid bails if #waypoints == 0).
+        if no_waypoint_region then
+            if BatmobilePlugin then
+                BatmobilePlugin.resume(plugin_label)
+                bm_pulse()
+            end
+            return
+        end
         if settings.experimental_explorer and experimental_armed then
             local player_pos = get_player_position()
             helltide_explorer.init()
@@ -2320,6 +2367,8 @@ local helltide_task = {
         experimental_armed    = false
         was_in_helltide_for_arm = false
         force_zone_change     = false
+        no_waypoint_region    = false
+        no_waypoint_logged_zone = nil
         farm_chest_entry    = nil
         tracker.clear_key("farm_chest_gone")
         farm_roam_points    = {}
