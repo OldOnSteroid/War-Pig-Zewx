@@ -16,6 +16,55 @@ local orchestrator = {}
 local TRANSITION_GAP_SECONDS    = 5
 local MAX_DISABLE_DEFER_SECONDS = 120
 
+-- Optional teleport sequence inserted between disable and enable when
+-- settings.use_teleport_transition is on. After a plugin is disabled and a
+-- new plugin is wanted, we send Tab once (open map / quest list), wait
+-- briefly, click the user-defined pixel target (initiate teleport to the
+-- next quest), and then wait for the channel + arrival before releasing
+-- the enable gate. Timings are deliberate: the Tab open animation is fast
+-- but the click must land after the UI has settled, and the quest teleport
+-- channel runs ~3-5s (matches teleport_to_waypoint).
+local TELEPORT_TAB_DELAY    = 0.5
+local TELEPORT_CLICK_DELAY  = 1.0
+local TELEPORT_SETTLE_DELAY = 5.0
+local TELEPORT_VK_TAB       = 0x09
+
+local teleport_transition = {
+    state      = 'IDLE',  -- IDLE | WAIT_TAB | WAIT_CLICK | WAIT_SETTLE
+    started_at = -math.huge,
+}
+-- True when a new activity just started (any pattern transitioned from
+-- unmatched → matched) and the teleport sequence still needs to fire.
+-- Cleared once we transition the state machine out of IDLE. This drives:
+--   * cold-start initial enable (no prior activity → first quest matches)
+--   * plugin → plugin transitions (new pattern matches before old unmatches)
+--   * the turn-in task (WarPlans_QST_TurnIn_Rewards becomes active)
+local teleport_pending = false
+-- Patterns that matched on the previous tick. Used for pattern-edge detection.
+local last_active_patterns = {}
+
+-- Recent click marker log for the on-screen "where did the bot just click?"
+-- overlay. Same shape WonderCity uses: each entry fades over CLICK_FADE
+-- seconds. Cap to 8 entries to bound memory in long sessions.
+local CLICK_FADE   = 6.0
+local recent_clicks = {}
+
+local function record_click(label, sx, sy, kind)
+    recent_clicks[#recent_clicks + 1] = {
+        label = label, x = sx, y = sy, kind = kind or 'left',
+        t = get_time_since_inject(),
+    }
+    while #recent_clicks > 8 do table.remove(recent_clicks, 1) end
+end
+
+function orchestrator.get_recent_clicks()
+    local now = get_time_since_inject()
+    while recent_clicks[1] and (now - recent_clicks[1].t) > CLICK_FADE do
+        table.remove(recent_clicks, 1)
+    end
+    return recent_clicks, CLICK_FADE
+end
+
 -- Predicate: is the player in a town level area? Reused by Pit / WonderCity /
 -- Helltide entries since "back in town" is the natural settle point for all
 -- three. Returns true on any failure to read the attribute (don't block on
@@ -456,7 +505,18 @@ function orchestrator.tick()
         if entry.task then
             -- Task entries are stateful internally; just signal active/idle.
             -- They do NOT participate in plugin ownership tracking.
-            local ok, err = pcall(entry.task.tick, matched)
+            -- While our teleport sequence is mid-flight, hold the task in
+            -- "inactive" so it doesn't fire its own teleport / actions and
+            -- compete with the orchestrator-driven Tab+Click. Once the
+            -- sequence settles back to IDLE, the next tick passes
+            -- matched=true and the task picks up normally (e.g. turn-in
+            -- task transitions IDLE → APPROACH_NPC since the orchestrator
+            -- just landed us in town).
+            local task_matched = matched
+            if matched and teleport_transition.state ~= 'IDLE' then
+                task_matched = false
+            end
+            local ok, err = pcall(entry.task.tick, task_matched)
             if not ok then log('task error (' .. pattern .. '): ' .. tostring(err)) end
         elseif matched and entry.plugin and not wants[entry.plugin] then
             wants[entry.plugin]          = entry
@@ -500,6 +560,36 @@ function orchestrator.tick()
             if not matches[pattern] then log('trigger unmatched: ' .. pattern) end
         end
     end
+
+    -- ── TELEPORT TRIGGER (pattern edge) ─────────────────────────────────────
+    -- Compute the set of patterns that will actually drive activity this tick:
+    --   * a plugin pattern that won the preemption pass (its plugin is in wants)
+    --   * a task pattern that's currently matched (tasks aren't preempted)
+    -- Any pattern present this tick but absent last tick is a NEW activity
+    -- start — fire the teleport sequence so the player teleports onto the
+    -- quest before the activity begins. Covers cold-start initial enable,
+    -- plugin → plugin transitions, and the turn-in task at the end of a run.
+    local active_patterns = {}
+    for plugin_name in pairs(wants) do
+        local pat = matched_reason[plugin_name]
+        if pat then active_patterns[pat] = true end
+    end
+    for pattern, raw_entry in pairs(orchestrator.quest_plugin_map) do
+        if matches[pattern] then
+            local entry = normalize(raw_entry)
+            if entry.task then active_patterns[pattern] = true end
+        end
+    end
+    if settings.use_teleport_transition then
+        for pattern in pairs(active_patterns) do
+            if not last_active_patterns[pattern] then
+                log('teleport queued — new activity matched: ' .. pattern)
+                teleport_pending = true
+                break
+            end
+        end
+    end
+    last_active_patterns = active_patterns
 
     -- ── DISABLE PHASE (runs first) ──────────────────────────────────────────
     -- Every managed plugin without a matching trigger must be off. Honors
@@ -565,16 +655,70 @@ function orchestrator.tick()
         end
     end
 
+    -- ── TELEPORT TRANSITION (optional) ──────────────────────────────────────
+    -- A new activity (plugin or task) just transitioned from unmatched →
+    -- matched (see "TELEPORT TRIGGER" block above). Run the Tab+Click
+    -- sequence and gate the enable + task tick until it settles. Stages are
+    -- time-driven so we don't need to poll game state for "map open" /
+    -- "teleport landing".
+    if settings.use_teleport_transition
+        and teleport_pending
+        and teleport_transition.state == 'IDLE'
+    then
+        teleport_pending = false
+        teleport_transition.state      = 'WAIT_TAB'
+        teleport_transition.started_at = now
+        log('teleport transition started — Tab in '
+            .. tostring(TELEPORT_TAB_DELAY) .. 's')
+    end
+    if teleport_transition.state == 'WAIT_TAB' then
+        if (now - teleport_transition.started_at) >= TELEPORT_TAB_DELAY then
+            if utility and type(utility.send_key_press) == 'function' then
+                utility.send_key_press(TELEPORT_VK_TAB)
+                log('teleport transition: Tab pressed')
+            else
+                log('teleport transition: utility.send_key_press unavailable — skipping Tab')
+            end
+            teleport_transition.state      = 'WAIT_CLICK'
+            teleport_transition.started_at = now
+        end
+    elseif teleport_transition.state == 'WAIT_CLICK' then
+        if (now - teleport_transition.started_at) >= TELEPORT_CLICK_DELAY then
+            local x = settings.teleport_click_x or 0
+            local y = settings.teleport_click_y or 0
+            if x > 0 and y > 0 and utility
+                and type(utility.send_mouse_click) == 'function'
+            then
+                utility.send_mouse_click(x, y)
+                record_click('Teleport', x, y, 'left')
+                log(string.format('teleport transition: clicked (%d, %d)', x, y))
+            else
+                log(string.format('teleport transition: skipping click — coords=(%d,%d)', x, y))
+            end
+            teleport_transition.state      = 'WAIT_SETTLE'
+            teleport_transition.started_at = now
+        end
+    elseif teleport_transition.state == 'WAIT_SETTLE' then
+        if (now - teleport_transition.started_at) >= TELEPORT_SETTLE_DELAY then
+            log('teleport transition: settled — releasing enable gate')
+            teleport_transition.state = 'IDLE'
+        end
+    end
+
     -- ── ENABLE GATE ─────────────────────────────────────────────────────────
     -- Don't start the next plugin while:
     --   (a) any plugin's disable is still deferred (outgoing not finished), or
-    --   (b) we just disabled something within TRANSITION_GAP_SECONDS.
+    --   (b) we just disabled something within TRANSITION_GAP_SECONDS, or
+    --   (c) teleport transition state machine is mid-sequence.
     -- This is the actual handoff sequencer — pairs with disable_when to give
     -- the game state a clean break between activities.
     local gate_reason = nil
     for p in pairs(pending_disable) do
         gate_reason = 'pending disable: ' .. p
         break
+    end
+    if not gate_reason and teleport_transition.state ~= 'IDLE' then
+        gate_reason = 'teleport transition: ' .. teleport_transition.state
     end
     if not gate_reason then
         for p, t in pairs(last_disable_time) do
@@ -645,6 +789,11 @@ function orchestrator.release_all()
     last_disable_time     = {}
     enable_blocked        = {}
     last_enabled_reason   = {}
+    teleport_pending      = false
+    teleport_transition.state      = 'IDLE'
+    teleport_transition.started_at = -math.huge
+    last_active_patterns  = {}
+    recent_clicks         = {}
 end
 
 function orchestrator.get_status_line()
