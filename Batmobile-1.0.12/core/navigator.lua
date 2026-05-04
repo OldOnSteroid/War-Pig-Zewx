@@ -1343,6 +1343,26 @@ navigator.move = function ()
         console.print('[nav] pathfinding to=' .. utils.vec_to_string(navigator.target) .. ' dist=' .. string.format('%.1f', dist_to_target) .. ' custom=' .. tostring(navigator.is_custom_target))
         local result, is_partial = path_finder.find_path(navigator.last_pos, navigator.target, navigator.is_custom_target)
 
+        -- Reject very short partial paths to far targets: A* found only 1-2 steps
+        -- before giving up, which means there's a wall/cliff/gap in the way and
+        -- the partial tail will land the player into it. Logzewx pattern (helltide
+        -- explore): plen=2 partial to dist=14.9 target, player walks 4.5u toward
+        -- cliff edge then wedges. Falling through to the failure handler triggers
+        -- the nudge / failed_direction recording / blacklist faster.
+        -- Custom targets and trav-routing keep partial paths regardless: traversal
+        -- approach nodes legitimately produce short partial paths.
+        if is_partial and #result > 0 and #result <= 3 and dist_to_target > 8
+            and not navigator.is_custom_target
+            and navigator.last_trav == nil
+            and (navigator.trav_delay == nil or get_time_since_inject() > navigator.trav_delay)
+        then
+            console.print('[nav] PARTIAL PATH REJECTED (plen=' .. #result ..
+                ' dist=' .. string.format('%.1f', dist_to_target) ..
+                ') — too short to make progress, falling through to failure')
+            result = {}
+            is_partial = false
+        end
+
         -- Partial path: A* couldn't reach the goal but got closer.
         -- Walk the partial path to approach the destination (e.g. cliff edge near a
         -- traversal). Don't increment fail count — the path IS making progress.

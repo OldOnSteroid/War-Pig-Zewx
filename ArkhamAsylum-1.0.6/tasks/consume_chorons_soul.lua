@@ -18,12 +18,23 @@ local CHARGE_DELAY    = 4.5    -- per-click channel — 10 × 4.5 ≈ 45s as obs
 local MAX_CLICKS      = 10     -- safety cap; soul typically goes non-interactable first
 local WALK_TIMEOUT    = 30.0   -- give up reaching this soul after this long without arriving
 
+-- Post-consume orb sweep: after the soul is exhausted, the experience orbs
+-- it dropped sit on the ground around the soul actor.  XP orbs auto-pickup
+-- when the player walks within range (~3-5u in D4); a small loop around the
+-- actor sweeps any orbs that landed beyond the soul's own pickup radius.
+local ORB_SWEEP_POINTS    = 6     -- hex pattern around the soul
+local ORB_SWEEP_RADIUS    = 4.5   -- meters from soul center
+local ORB_SWEEP_ARRIVAL   = 1.5   -- distance to current point that counts as "reached"
+local ORB_SWEEP_PER_PT_TIMEOUT = 2.5  -- give up on a single point after this long
+local ORB_SWEEP_TOTAL_TIMEOUT  = 12.0 -- hard cap on the whole sweep
+
 local status_enum = {
     IDLE       = 'idle',
     WALKING    = "walking to Choron's Soul",
     LOOT_DELAY = "waiting at Choron's Soul (loot window)",
     CLICKING   = "clicking Choron's Soul",
     CHARGING   = "Choron's Soul charging",
+    ORB_SWEEP  = "collecting XP orbs around Choron's Soul",
     DONE       = "Choron's Soul consumed",
 }
 
@@ -41,6 +52,16 @@ local last_click_time = nil    -- nil before first click; set after each interac
 local click_count     = 0
 local first_seen_time = nil    -- when we first started tracking this soul (walk timeout)
 local skipped_souls   = {}     -- hard-skip on truly broken souls (walk timeout exhausted)
+-- Orb-sweep state.  `orb_sweep_points` is the sequence of vec3 ring points
+-- around the soul's last-known position; `orb_sweep_idx` advances when we
+-- arrive at a point or its per-point timeout elapses.  When `orb_sweep_done`
+-- flips true the task fully finishes and shouldExecute returns false.
+local orb_sweep_points     = nil
+local orb_sweep_idx        = 1
+local orb_sweep_start_time = nil
+local orb_sweep_pt_started = nil
+local orb_sweep_done       = false
+local soul_last_pos        = nil  -- snapshotted when we transition to ORB_SWEEP (actor may despawn)
 
 local function soul_key(actor)
     local pos = actor:get_position()
@@ -48,11 +69,30 @@ local function soul_key(actor)
 end
 
 local function reset_soul_state()
-    active_soul_key = nil
-    arrived_time    = nil
-    last_click_time = nil
-    click_count     = 0
-    first_seen_time = nil
+    active_soul_key      = nil
+    arrived_time         = nil
+    last_click_time      = nil
+    click_count          = 0
+    first_seen_time      = nil
+    orb_sweep_points     = nil
+    orb_sweep_idx        = 1
+    orb_sweep_start_time = nil
+    orb_sweep_pt_started = nil
+    orb_sweep_done       = false
+    soul_last_pos        = nil
+end
+
+local function build_sweep_points(center)
+    local pts = {}
+    for i = 1, ORB_SWEEP_POINTS do
+        local theta = (i - 1) * (2 * math.pi / ORB_SWEEP_POINTS)
+        pts[i] = vec3:new(
+            center:x() + ORB_SWEEP_RADIUS * math.cos(theta),
+            center:y() + ORB_SWEEP_RADIUS * math.sin(theta),
+            center:z()
+        )
+    end
+    return pts
 end
 
 -- Returns the first non-blacklisted Choron's Soul actor.  Uses get_all_actors
@@ -79,19 +119,81 @@ task.shouldExecute = function()
     if not settings.use_chorons_soul then return false end
     if not utils.player_in_pit() then return false end
 
+    -- Orb sweep armed — keep running even after the soul actor has vanished,
+    -- since we drive the sweep off `soul_last_pos`, not the actor.  Triggered
+    -- when the click loop transitions to the sweep (sets soul_last_pos).
+    if soul_last_pos and not orb_sweep_done then return true end
+
     local soul, key = get_chorons_soul()
     if not soul then
         if active_soul_key then reset_soul_state() end
         return false
     end
 
-    -- Already finished this soul — don't re-engage if it's still rendering.
-    if active_soul_key == key then
-        if click_count >= MAX_CLICKS then return false end
-        if not soul:is_interactable() and click_count > 0 then return false end
+    -- A fresh soul (different position) appeared after we finished a previous
+    -- one — clear the per-session done flag and re-engage on this new soul.
+    if orb_sweep_done and active_soul_key ~= key then
+        reset_soul_state()
+        return true
     end
 
+    -- Same soul we already finished this session — don't re-engage even if
+    -- the actor is still rendering.
+    if orb_sweep_done then return false end
+
     return true
+end
+
+-- Walks one lap around `soul_last_pos` to sweep up XP orbs that landed beyond
+-- the soul's own pickup radius.  Each ring point is targeted via Batmobile;
+-- arrival within ORB_SWEEP_ARRIVAL OR per-point timeout advances the index.
+-- Sets orb_sweep_done = true when all points are visited or the total timeout
+-- elapses.  Caller wraps this in pause+update of Batmobile.
+local function step_orb_sweep(local_player, now)
+    if not orb_sweep_points then
+        if not soul_last_pos then
+            -- Defensive: nothing to sweep around — finish immediately.
+            orb_sweep_done = true
+            return
+        end
+        orb_sweep_points     = build_sweep_points(soul_last_pos)
+        orb_sweep_idx        = 1
+        orb_sweep_start_time = now
+        orb_sweep_pt_started = now
+        console.print(string.format(
+            "[consume_chorons_soul] starting orb sweep — %d points, radius=%.1f",
+            ORB_SWEEP_POINTS, ORB_SWEEP_RADIUS))
+    end
+
+    -- Total budget exceeded — bail out cleanly.
+    if (now - orb_sweep_start_time) > ORB_SWEEP_TOTAL_TIMEOUT then
+        console.print("[consume_chorons_soul] orb sweep total timeout — finishing")
+        orb_sweep_done = true
+        BatmobilePlugin.clear_target(plugin_label)
+        return
+    end
+
+    -- All points visited — sweep is complete.
+    if orb_sweep_idx > #orb_sweep_points then
+        console.print("[consume_chorons_soul] orb sweep complete")
+        orb_sweep_done = true
+        BatmobilePlugin.clear_target(plugin_label)
+        return
+    end
+
+    local target = orb_sweep_points[orb_sweep_idx]
+    local dist   = utils.distance(local_player, target)
+    if dist < ORB_SWEEP_ARRIVAL
+        or (orb_sweep_pt_started and (now - orb_sweep_pt_started) > ORB_SWEEP_PER_PT_TIMEOUT)
+    then
+        orb_sweep_idx        = orb_sweep_idx + 1
+        orb_sweep_pt_started = now
+        return  -- next tick targets the next point
+    end
+
+    BatmobilePlugin.set_target(plugin_label, target, true)  -- short hops, suppress movement spell
+    BatmobilePlugin.move(plugin_label)
+    task.status = status_enum['ORB_SWEEP']
 end
 
 task.Execute = function()
@@ -99,6 +201,14 @@ task.Execute = function()
     if not local_player then return end
     BatmobilePlugin.pause(plugin_label)
     BatmobilePlugin.update(plugin_label)
+
+    -- Orb sweep takes priority over everything else — once the clicks are
+    -- done and we've snapshot soul_last_pos, the actor may despawn at any
+    -- moment.  Drive the sweep off the snapshot, not the live actor.
+    if soul_last_pos and not orb_sweep_done then
+        step_orb_sweep(local_player, get_time_since_inject())
+        return
+    end
 
     local soul, key = get_chorons_soul()
     if soul == nil then
@@ -168,14 +278,27 @@ task.Execute = function()
         return
     end
 
-    -- Stop conditions: soul self-deactivated (game cap reached) OR our safety cap
+    -- Stop conditions: soul self-deactivated (game cap reached) OR our safety
+    -- cap.  Snapshot the soul position and transition to the orb sweep — the
+    -- actor may despawn between this tick and the next, so we record its pos
+    -- now and drive the sweep off the snapshot.  Only enter the sweep if we
+    -- actually clicked at least once (no clicks = no orbs to collect).
+    local function enter_orb_sweep(reason)
+        if click_count == 0 then
+            console.print("[consume_chorons_soul] " .. reason .. " — no clicks fired, skipping orb sweep")
+            orb_sweep_done = true
+            return
+        end
+        soul_last_pos = vec3:new(soul:get_position():x(), soul:get_position():y(), soul:get_position():z())
+        console.print("[consume_chorons_soul] " .. reason ..
+            " after " .. click_count .. " clicks — entering orb sweep")
+    end
     if not soul:is_interactable() then
-        task.status = status_enum['DONE']
+        enter_orb_sweep("soul went non-interactable")
         return
     end
     if click_count >= MAX_CLICKS then
-        console.print("[consume_chorons_soul] reached MAX_CLICKS (" .. MAX_CLICKS .. ")")
-        task.status = status_enum['DONE']
+        enter_orb_sweep("reached MAX_CLICKS (" .. MAX_CLICKS .. ")")
         return
     end
 
