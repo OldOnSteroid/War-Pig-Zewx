@@ -126,6 +126,11 @@ task.Execute = function ()
     BatmobilePlugin.pause(plugin_label)
     local gizmo = utils.get_glyph_upgrade_gizmo()
     local glyphs = get_glyphs()
+    -- Suppress orbwalker skill casts within 5 units of the glyphstone after boss dies.
+    -- Re-enabled in exit_pit before the teleport channel fires.
+    if tracker.boss_dead and gizmo ~= nil and utils.distance(local_player, gizmo) <= 5 then
+        orbwalker.set_clear_toggle(false)
+    end
     if gizmo ~= nil and utils.distance(local_player, gizmo) > 2 then
         local disable_spell = false
         if utils.distance(local_player, gizmo) <= 4 then

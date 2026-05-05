@@ -32,6 +32,7 @@ local navigator = {
     failed_target_radius = 15,
     trav_final_target = nil,
     blacklisted_trav = {},
+    all_trav_blocked_until = 0,  -- global traversal suppression (portal ledge approach)
     move_time = -1,
     move_timeout = 0.05,
     update_time = -1,
@@ -119,6 +120,7 @@ explorer.failed_directions = navigator.failed_directions
 -- Always pass the full name+position string (`trav_str`).  Time arg is
 -- supplied by the caller so we don't call get_time_since_inject() twice.
 local function is_trav_blacklisted(trav_str, now)
+    if now < navigator.all_trav_blocked_until then return true end
     local bl_time = navigator.blacklisted_trav[trav_str]
     if bl_time ~= nil and type(bl_time) == "number" and (now - bl_time) < 15 then
         return true
@@ -277,6 +279,9 @@ local function try_traversal_route(local_player, player_pos)
     -- (logzewx showed bot crossing F1→F2 then immediately F2→F1 via this path).
     local now = get_time_since_inject()
     if navigator.trapped or now < navigator.trap_post_escape_grace_until then
+        return false, nil
+    end
+    if now < navigator.all_trav_blocked_until then
         return false, nil
     end
     local nearby_travs = get_nearby_travs(local_player)
@@ -649,6 +654,7 @@ navigator.reset_movement = function ()
     navigator.failed_target_radius = 15
     navigator.trav_final_target = nil
     navigator.blacklisted_trav = {}
+    navigator.all_trav_blocked_until = 0
     navigator.blacklisted_spell_node = {}
     navigator.trav_escape_pos = nil
     navigator.post_trav_target = nil
@@ -1589,6 +1595,14 @@ navigator.move = function ()
             return
         else
             console.print('[nav] pathfind OK, path=#' .. #result)
+            if navigator.is_custom_target and navigator.is_partial_path then
+                -- Custom target had partial paths (e.g. portal on a ledge) and A* just
+                -- found a full route — we're on the same surface now.  Suppress all
+                -- traversal selection for 60s so nothing interrupts the final approach.
+                local _now_bl = get_time_since_inject()
+                navigator.all_trav_blocked_until = _now_bl + 60
+                console.print('[nav] custom target found full path (was partial) — blocking traversals 60s')
+            end
             navigator.is_partial_path = false
             tracker.debug_node = nil
             navigator.pathfind_fail_count = 0
