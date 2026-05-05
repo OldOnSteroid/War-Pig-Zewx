@@ -32,6 +32,8 @@ gui.elements = {
     kill_monsters_toggle = create_checkbox(true, plugin_label .. "kill_monsters_toggle"),
     experimental_explorer_toggle = create_checkbox(false, plugin_label .. "experimental_explorer_toggle"),
     farm_cinder_threshold = slider_int:new(0, 250, 0, get_hash(plugin_label .. "_farm_cinder_threshold")),
+    do_maiden_toggle = create_checkbox(false, plugin_label .. "do_maiden_toggle"),
+    maiden_disable_cinders = slider_int:new(0, 1000, 0, get_hash(plugin_label .. "_maiden_disable_cinders")),
 }
 
 function gui.render()
@@ -54,6 +56,10 @@ function gui.render()
         gui.elements.kill_monsters_toggle:render("Kill Monsters", "Navigate to and kill nearby monsters while exploring")
         gui.elements.experimental_explorer_toggle:render("Experimental Explorer", "Zone-wide grid coverage instead of Batmobile frontier. Tracks chest locations across the full helltide hour. Resets only when helltide ends.")
         gui.elements.farm_cinder_threshold:render("Farm Cinder Threshold (beta)", "Stay near a remembered chest and kill monsters when you are within this many cinders of affording it (0 = disabled)")
+        gui.elements.do_maiden_toggle:render("Do Maiden", "Walk to the maiden altar, insert hearts (up to 3) and stay pinned to fight the maiden. Requires Helltide Coin Hearts in your inventory.")
+        if gui.elements.do_maiden_toggle:get() then
+            gui.elements.maiden_disable_cinders:render("Disable Maiden at Cinders", "Stop running maiden once you reach this cinder count (0 = never disable). Useful so the bot can spend cinders before saving more for chests.", 1)
+        end
         gui.elements.settings_tree:pop()
     end
 

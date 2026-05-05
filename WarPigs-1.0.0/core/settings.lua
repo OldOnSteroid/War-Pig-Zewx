@@ -14,6 +14,17 @@ local settings = {
     log_all_quests  = false,
 }
 
+-- Module-level capture cache. The slider_int widget on this host doesn't
+-- expose a :set() method — `:set(...)` errors with "attempt to call method
+-- 'set' (a nil value)" — so we can't update the slider's displayed value
+-- programmatically. Instead we cache the captured pixel here and prefer it
+-- over the slider value when populating settings. Manual slider edits still
+-- work (cleared by setting the slider to anything via the GUI is not
+-- detectable, so once you capture, the slider value is overridden until the
+-- script reloads — acceptable since capture is opt-in via keybind).
+local captured_click_x = nil
+local captured_click_y = nil
+
 settings.update_settings = function()
     settings.enabled        = gui.elements.main_toggle:get()
     settings.use_keybind    = gui.elements.use_keybind:get()
@@ -22,22 +33,25 @@ settings.update_settings = function()
 
     -- Keybind capture: when the user presses the bound key (default F5)
     -- while hovering an in-game target, capture the cursor's screen pixel
-    -- position into the X/Y sliders. Rising-edge consumed via :get_state().
+    -- position. Rising-edge consumed via :get_state().
     if gui.elements.teleport_capture_keybind:get_state() == 1 then
         if utility and type(utility.get_cursor_screen_position) == 'function' then
             local cx, cy = utility.get_cursor_screen_position()
             if cx and cy then
-                gui.elements.teleport_click_x:set(math.floor(cx))
-                gui.elements.teleport_click_y:set(math.floor(cy))
+                captured_click_x = math.floor(cx)
+                captured_click_y = math.floor(cy)
                 console.print(string.format(
-                    '[WarPigs] captured teleport click target = (%d, %d)',
-                    math.floor(cx), math.floor(cy)))
+                    '[WarPigs] captured teleport click target = (%d, %d) [in-memory; slider widget read-only on this host]',
+                    captured_click_x, captured_click_y))
             end
         end
     end
 
-    settings.teleport_click_x = gui.elements.teleport_click_x:get()
-    settings.teleport_click_y = gui.elements.teleport_click_y:get()
+    -- Prefer the captured value over the slider when present. Falls back to
+    -- the slider so a fresh script load (no capture yet) still honors the
+    -- saved slider position.
+    settings.teleport_click_x = captured_click_x or gui.elements.teleport_click_x:get()
+    settings.teleport_click_y = captured_click_y or gui.elements.teleport_click_y:get()
     settings.show_click_points = gui.elements.show_click_points:get()
     settings.verbose_logs   = gui.elements.verbose_logs:get()
     settings.log_all_quests = gui.elements.log_all_quests:get()

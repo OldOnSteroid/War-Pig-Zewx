@@ -612,7 +612,58 @@ local helltide_state = {
     FARM_CHEST_CINDERS = "FARM_CHEST_CINDERS",
     BACK_TO_TOWN = "BACK_TO_TOWN",
     RETURN_TO_HELLTIDE = "RETURN_TO_HELLTIDE",
+    MOVING_TO_MAIDEN = "MOVING_TO_MAIDEN",
+    AT_MAIDEN = "AT_MAIDEN",
 }
+
+-- ── Maiden state (do_maiden setting) ────────────────────────────────────────
+-- Tunables and module-local state for the maiden lock-on. The actual helper
+-- functions (find_maiden_altar, should_do_maiden) are defined further down —
+-- AFTER get_cached_actors — because Lua resolves forward references to locals
+-- as nil-globals at function-definition time.
+--
+-- Mechanic the bot mirrors (per user spec):
+--   * 3 altars exist at the maiden site
+--   * Insert 1 heart at any altar → that altar disappears (or goes
+--     non-interactable). Walk to next altar, insert, repeat.
+--   * After all 3 hearts placed (across all players in the pile) the maiden
+--     boss spawns. Stay in the lock zone, kill her + adds, then resume
+--     inserting once altars come back.
+-- We do NOT cap hearts inserted by us. We just chase any interactable altar
+-- in range. Combat happens inside the lock zone whenever there's no altar to
+-- interact with.
+local MAIDEN_ARRIVE_DIST   = 6     -- meters: switch from MOVING_TO_MAIDEN to AT_MAIDEN
+local MAIDEN_LOCK_RADIUS   = 12    -- meters: drift further than this and we re-pin
+local MAIDEN_KILL_RADIUS   = 15    -- meters: only kill monsters within this of altar
+local MAIDEN_INTERACT_DIST = 5     -- meters: interact with altar within this range
+local MAIDEN_ALTAR_SEARCH  = 14    -- meters: walk to interactable altars within this range
+local MAIDEN_INSERT_WAIT   = 3.0   -- seconds: charge time before checking heart drop
+local MAIDEN_INSERT_RETRY  = 1.5   -- seconds: total wait before declaring an attempt failed
+local maiden_pos                       = nil   -- vec3 of the active altar (set on entry)
+local maiden_pre_insert_heart_count    = nil   -- snapshot before interact_object
+local maiden_insert_attempt_t          = nil   -- get_time_since_inject of last interact
+local maiden_last_log_t                = 0
+
+local function maiden_reset_cycle()
+    maiden_pre_insert_heart_count = nil
+    maiden_insert_attempt_t       = nil
+end
+
+-- Returns the maiden altar position for the current zone, or nil if unsupported.
+local function get_maiden_pos()
+    local world = get_current_world()
+    if not world then return nil end
+    local zname = world:get_current_zone_name()
+    if not zname then return nil end
+    return enums.maiden_positions and enums.maiden_positions[zname] or nil
+end
+
+-- find_maiden_altar / should_do_maiden are declared as forward locals here
+-- so check_events (which calls should_do_maiden) and the state handlers
+-- (which call both) can see them. The actual bodies are assigned below
+-- get_cached_actors — see [maiden helpers — bodies] block.
+local find_maiden_altar
+local should_do_maiden
 
 -- Cached actor list: get_all_actors() is expensive, share one snapshot across all
 -- find_closest_target() and scan_and_remember_chests() calls within the same frame.
@@ -632,6 +683,63 @@ local function get_cached_actors()
         perf.inc("actor_cache_hit")
     end
     return cached_actors
+end
+
+-- ── [maiden helpers — bodies] ──────────────────────────────────────────────
+-- Forward-declared above (alongside the maiden tunables/state). Bodies live
+-- here so they can see the local `get_cached_actors` defined just above.
+-- Scan cached actors for the closest INTERACTABLE maiden altar within range.
+-- The is_interactable filter is essential: after a heart is inserted the
+-- altar may linger in the actor list briefly with interactable=false; without
+-- the filter we'd repeatedly try to interact with a spent altar.
+find_maiden_altar = function(max_dist)
+    local target_skin = enums.maiden_altar_skin
+    if not target_skin then return nil end
+    local actors = get_cached_actors()
+    local player_pos = get_player_position()
+    local best, best_dist = nil, math.huge
+    local target_skin_lc = string.lower(target_skin)
+    for _, actor in pairs(actors) do
+        local skin = actor:get_skin_name()
+        if skin and string.lower(skin) == target_skin_lc then
+            local ok_i, interactable = pcall(function() return actor:is_interactable() end)
+            if ok_i and interactable then
+                local d = player_pos:dist_to(actor:get_position())
+                if d < best_dist and d <= (max_dist or math.huge) then
+                    best, best_dist = actor, d
+                end
+            end
+        end
+    end
+    return best, best_dist
+end
+
+-- Single source of truth for "should we be doing maiden right now?"
+-- Used by check_events to enter, and by AT_MAIDEN to know when to release.
+should_do_maiden = function()
+    if not settings.do_maiden then return false, "setting off" end
+    if not utils.is_in_helltide() then return false, "not in helltide" end
+    if not get_maiden_pos() then return false, "no maiden pos for zone" end
+    -- Heart-count check: get_helltide_coin_hearts may not exist on older hosts.
+    -- If the helper is unavailable, we can still drive the maiden lock-on (the
+    -- altar interact will just no-op without hearts), but we treat 0 hearts as
+    -- "don't bother" to avoid pinning the player at the altar with nothing to do.
+    local hearts_fn = _G.get_helltide_coin_hearts
+    if hearts_fn then
+        local ok, hearts = pcall(hearts_fn)
+        if ok and (hearts == nil or hearts <= 0) then
+            return false, "no hearts"
+        end
+    end
+    -- Cinder threshold: when set > 0, stop doing maiden once cinders >= threshold
+    -- so the bot can spend those cinders before continuing to farm.
+    if settings.maiden_disable_cinders and settings.maiden_disable_cinders > 0 then
+        local cinders = get_helltide_coin_cinders()
+        if cinders >= settings.maiden_disable_cinders then
+            return false, "cinder threshold reached (" .. cinders .. ">=" .. settings.maiden_disable_cinders .. ")"
+        end
+    end
+    return true, nil
 end
 
 -- DEBUG: scan for all chest actors every 2 seconds
@@ -925,6 +1033,48 @@ end
 
 local function check_events(self)
     local target -- reusable local for caching find_closest_target results
+
+    -- Priority 0: Maiden — overrides everything else when the user opts in.
+    -- Stays in the maiden loop until heart count hits 0, the cinder threshold
+    -- is reached, or the user toggles off. Boss-fight kill_monsters happens
+    -- INSIDE the AT_MAIDEN state (lock radius enforced) so we don't lose the pin.
+    do
+        local ok, why = should_do_maiden()
+        if ok then
+            local mpos = get_maiden_pos()
+            if mpos then
+                if utils.distance_to(mpos) <= MAIDEN_ARRIVE_DIST then
+                    -- Already at the altar — go straight into the pinned loop.
+                    if self.current_state ~= helltide_state.AT_MAIDEN then
+                        console.print("[MAIDEN] Already at altar — entering AT_MAIDEN")
+                        maiden_pos = mpos
+                        maiden_reset_cycle()
+                    end
+                    self.current_state = helltide_state.AT_MAIDEN
+                else
+                    if self.current_state ~= helltide_state.MOVING_TO_MAIDEN
+                        and self.current_state ~= helltide_state.AT_MAIDEN
+                    then
+                        console.print(string.format(
+                            "[MAIDEN] Routing to altar at (%.1f,%.1f,%.1f) dist=%.1f",
+                            mpos:x(), mpos:y(), mpos:z(), utils.distance_to(mpos)))
+                        maiden_pos = mpos
+                        maiden_reset_cycle()
+                    end
+                    self.current_state = helltide_state.MOVING_TO_MAIDEN
+                end
+                return
+            end
+        elseif self.current_state == helltide_state.AT_MAIDEN
+            or self.current_state == helltide_state.MOVING_TO_MAIDEN
+        then
+            -- Was doing maiden, now condition is gone — release back to explore.
+            console.print("[MAIDEN] Releasing maiden lock — " .. (why or "?"))
+            maiden_pos = nil
+            maiden_reset_cycle()
+            self.current_state = helltide_state.EXPLORE_HELLTIDE
+        end
+    end
 
     -- Priority 1: Cinder chests when player can afford one
     if settings.helltide_chest then
@@ -1351,6 +1501,10 @@ local helltide_task = {
             self:back_to_town()
         elseif self.current_state == helltide_state.RETURN_TO_HELLTIDE then
             self:return_to_helltide()
+        elseif self.current_state == helltide_state.MOVING_TO_MAIDEN then
+            self:move_to_maiden()
+        elseif self.current_state == helltide_state.AT_MAIDEN then
+            self:at_maiden()
         end
         perf.stop("hr_tick", "state=" .. tostring(self.current_state))
     end,
@@ -1739,6 +1893,193 @@ local helltide_task = {
         else
             clear_movement()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
+        end
+    end,
+
+    -- ── Maiden states ──────────────────────────────────────────────────────
+    move_to_maiden = function(self)
+        -- Re-evaluate gating every tick so a setting toggle / heart depletion
+        -- releases us mid-route instead of finishing the walk first.
+        local ok, why = should_do_maiden()
+        if not ok then
+            console.print("[MAIDEN] Releasing during route — " .. (why or "?"))
+            maiden_pos = nil
+            maiden_reset_cycle()
+            clear_movement()
+            self.current_state = helltide_state.EXPLORE_HELLTIDE
+            return
+        end
+        if not maiden_pos then maiden_pos = get_maiden_pos() end
+        if not maiden_pos then
+            self.current_state = helltide_state.EXPLORE_HELLTIDE
+            return
+        end
+        local dist = utils.distance_to(maiden_pos)
+        if dist <= MAIDEN_ARRIVE_DIST then
+            console.print(string.format("[MAIDEN] Arrived at altar (dist=%.1f) — entering AT_MAIDEN", dist))
+            maiden_reset_cycle()
+            self.current_state = helltide_state.AT_MAIDEN
+            return
+        end
+        navigate_to(maiden_pos)
+    end,
+
+    at_maiden = function(self)
+        -- Release condition (setting off / out of hearts / cinder threshold reached)
+        local ok, why = should_do_maiden()
+        if not ok then
+            console.print("[MAIDEN] Releasing pin — " .. (why or "?"))
+            maiden_pos = nil
+            maiden_reset_cycle()
+            if BatmobilePlugin then BatmobilePlugin.clear_target(plugin_label) end
+            clear_movement()
+            self.current_state = helltide_state.EXPLORE_HELLTIDE
+            return
+        end
+
+        if not maiden_pos then maiden_pos = get_maiden_pos() end
+        if not maiden_pos then
+            self.current_state = helltide_state.EXPLORE_HELLTIDE
+            return
+        end
+
+        local now = get_time_since_inject()
+        local dist_to_pos = utils.distance_to(maiden_pos)
+
+        -- Heart count helper (gracefully handle absence on older hosts).
+        local hearts_fn = _G.get_helltide_coin_hearts
+        local current_hearts = nil
+        if hearts_fn then
+            local ok_h, h = pcall(hearts_fn)
+            if ok_h then current_hearts = h end
+        end
+
+        -- Find any nearby altar that's currently interactable. Per spec: 3
+        -- altars exist; inserting into one makes it disappear / go non-
+        -- interactable. We chase whichever is closest until none remain.
+        local altar, altar_dist = find_maiden_altar(MAIDEN_ALTAR_SEARCH)
+
+        -- Periodic state log (every 3s) so we can see what the bot's doing.
+        if now - maiden_last_log_t > 3 then
+            maiden_last_log_t = now
+            console.print(string.format(
+                "[MAIDEN] dist_to_pos=%.1f hearts=%s altar=%s in_flight=%s",
+                dist_to_pos, tostring(current_hearts),
+                altar and string.format("%.1f", altar_dist) or "none",
+                maiden_insert_attempt_t and "yes" or "no"))
+        end
+
+        -- Lock enforcement: kill_monsters / dodge / knockback can drag the
+        -- player out of the maiden site. Snap back BEFORE anything else when
+        -- we're outside the lock radius — but ONLY measure against maiden_pos,
+        -- not the altar (an altar that just spawned far is not a reason to
+        -- abandon the lock).
+        if dist_to_pos > MAIDEN_LOCK_RADIUS then
+            if maiden_insert_attempt_t ~= nil then
+                console.print("[MAIDEN] Drifted out of lock radius mid-insert — re-locking")
+                maiden_insert_attempt_t       = nil
+                maiden_pre_insert_heart_count = nil
+            end
+            navigate_to(maiden_pos)
+            return
+        end
+
+        -- ── Heart insertion ────────────────────────────────────────────────
+        -- Insert state machine. Skip when out of hearts (let combat / idle
+        -- handle the rest of the tick). When we have hearts AND see an
+        -- interactable altar, walk to it / interact / wait for the host's
+        -- heart count to drop (= confirmation the insert took).
+        local can_insert = (current_hearts == nil or current_hearts > 0)
+
+        if maiden_insert_attempt_t ~= nil then
+            -- Attempt in flight — wait for the heart count to drop or timeout.
+            local elapsed = now - maiden_insert_attempt_t
+            local before  = maiden_pre_insert_heart_count
+            if before ~= nil and current_hearts ~= nil and current_hearts < before then
+                console.print(string.format(
+                    "[MAIDEN] Heart inserted (hearts %s -> %s)",
+                    tostring(before), tostring(current_hearts)))
+                maiden_insert_attempt_t       = nil
+                maiden_pre_insert_heart_count = nil
+            elseif elapsed >= MAIDEN_INSERT_RETRY then
+                console.print(string.format(
+                    "[MAIDEN] Insert attempt timed out after %.1fs — retrying", elapsed))
+                maiden_insert_attempt_t       = nil
+                maiden_pre_insert_heart_count = nil
+            else
+                -- Hold position during the charge window so the interact
+                -- channel completes cleanly. Past the charge window, allow
+                -- natural movement (combat / next altar walk).
+                if elapsed < MAIDEN_INSERT_WAIT then
+                    if BatmobilePlugin then BatmobilePlugin.pause(plugin_label) end
+                    clear_movement()
+                end
+                return
+            end
+        end
+
+        if can_insert and altar then
+            if altar_dist <= MAIDEN_INTERACT_DIST then
+                -- In range — start a new insert attempt.
+                maiden_pre_insert_heart_count = current_hearts
+                maiden_insert_attempt_t       = now
+                console.print(string.format(
+                    "[MAIDEN] Interacting with altar (dist=%.1f, hearts_before=%s)",
+                    altar_dist, tostring(current_hearts)))
+                interact_object(altar)
+                if BatmobilePlugin then BatmobilePlugin.pause(plugin_label) end
+                clear_movement()
+                return
+            else
+                -- Altar visible but not close enough — walk to it. Caps at
+                -- MAIDEN_LOCK_RADIUS via the early return above so we can't
+                -- stray into the next zone chasing an outlier altar.
+                navigate_to(altar:get_position())
+                return
+            end
+        end
+
+        -- ── Combat / pinning ───────────────────────────────────────────────
+        -- No interactable altar OR no hearts to insert. Kill nearby monsters
+        -- inside the lock zone, or idle on maiden_pos.
+        local km_target = nil
+        if settings.kill_monsters then
+            km_target = get_kill_target()
+            if km_target then
+                local km_dist_to_pos = maiden_pos:dist_to(km_target:get_position())
+                if km_dist_to_pos > MAIDEN_KILL_RADIUS then
+                    km_target = nil  -- outside lock zone — ignore
+                end
+            end
+        end
+
+        if km_target then
+            orbwalker.set_clear_toggle(true)
+            local cur_dist = utils.distance_to(km_target)
+            if cur_dist > 2 then
+                if BatmobilePlugin then
+                    BatmobilePlugin.pause(plugin_label)
+                    BatmobilePlugin.set_target(plugin_label, km_target)
+                    bm_pulse(false)
+                else
+                    pathfinder.request_move(km_target:get_position())
+                end
+            else
+                if BatmobilePlugin then BatmobilePlugin.clear_target(plugin_label) end
+            end
+            return
+        end
+
+        -- Drift back to altar position if we're past the arrive threshold,
+        -- otherwise idle so the navigator doesn't oscillate on micro-movement.
+        if dist_to_pos > MAIDEN_ARRIVE_DIST then
+            navigate_to(maiden_pos)
+        else
+            if BatmobilePlugin then
+                BatmobilePlugin.pause(plugin_label)
+                BatmobilePlugin.clear_target(plugin_label)
+            end
+            clear_movement()
         end
     end,
 

@@ -834,6 +834,16 @@ function orchestrator.tick()
                     log('detected self-disable of ' .. plugin_name ..
                         ' — applying ' .. TRANSITION_GAP_SECONDS .. 's transition gap')
                     last_disable_time[plugin_name] = now
+                    -- Arm the teleport sequence even on self-disable. plugin_disable()
+                    -- is the normal arm site, but it's bypassed here. Without this,
+                    -- Reaper finishing its rotation (self-disables via main.lua) hands
+                    -- off to the next plugin (e.g. HelltideRevamped) without the
+                    -- Tab+click teleport — and if Reaper's own teleport_to_waypoint
+                    -- silently failed, the next plugin enables in the boss room.
+                    if settings.use_teleport_transition then
+                        teleport_pending = true
+                        log('arming teleport_pending (self-disable handoff)')
+                    end
                 end
                 pending_disable[plugin_name]       = nil
                 pending_disable_since[plugin_name] = nil

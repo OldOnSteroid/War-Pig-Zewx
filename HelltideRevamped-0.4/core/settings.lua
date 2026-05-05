@@ -19,6 +19,8 @@ local settings = {
     kill_monsters = true,
     experimental_explorer = false,
     farm_cinder_threshold = 0,
+    do_maiden = false,
+    maiden_disable_cinders = 0,
 }
 
 function settings:update_settings()
@@ -40,6 +42,8 @@ function settings:update_settings()
     settings.kill_monsters = gui.elements.kill_monsters_toggle:get()
     settings.experimental_explorer = gui.elements.experimental_explorer_toggle:get()
     settings.farm_cinder_threshold = gui.elements.farm_cinder_threshold:get()
+    settings.do_maiden = gui.elements.do_maiden_toggle:get()
+    settings.maiden_disable_cinders = gui.elements.maiden_disable_cinders:get()
 end
 
 return settings

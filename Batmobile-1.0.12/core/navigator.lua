@@ -2004,11 +2004,16 @@ navigator.attempt_escape = function(local_player)
             -- lock out the right gizmo for 5 minutes.  See logzewx where
             -- escape #3 picked a closer Down and long-blocked the F2→F3 Up
             -- (cand[4] showed `trap_bl=true` on subsequent escapes).
-            local best_dir_up = best_trav:get_skin_name():match('Up') ~= nil
+            local best_name        = best_trav:get_skin_name()
+            local best_dir_up      = best_name:match('Up') ~= nil
+            local best_dir_down    = best_name:match('Down') ~= nil
+            local best_directional = best_dir_up or best_dir_down
             local choice_matches_pref = (prefer_up and best_dir_up)
-                or (prefer_down and not best_dir_up)
+                or (prefer_down and best_dir_down)
             local opposite_blocked = 0
             if choice_matches_pref then
+                -- Directional case (existing behavior): block opposite-direction
+                -- gizmos in the trap zone so we don't immediately re-cross back.
                 for _, trav2 in ipairs(traversals) do
                     if trav2 ~= best_trav then
                         local tpos2 = trav2:get_position()
@@ -2022,6 +2027,40 @@ navigator.attempt_escape = function(local_player)
                                 (best_dir_up and n2_down and not n2_up)
                                 or (not best_dir_up and n2_up and not n2_down)
                             if is_opposite then
+                                local key2 = n2 .. utils.vec_to_string(tpos2)
+                                navigator.trap_blacklisted_trav[key2] = now + TRAV_TRAP_BL_DURATION
+                                opposite_blocked = opposite_blocked + 1
+                            end
+                        end
+                    end
+                end
+            elseif not best_directional then
+                -- Non-directional case (HandOverHand, FreeClimb without Up/Down):
+                -- there's no "opposite direction" to detect, but two non-directional
+                -- gizmos at the same z form a ping-pong pair. After we cross via
+                -- the chosen one, the partner sits on the OTHER side waiting for
+                -- the player to drift back into trap state and re-cross via it
+                -- (logzewx 12213-12222: escape #6/7/8 alternating between two
+                -- HandOverHand gizmos at z=12.91, neither blocked because
+                -- choice_matches_pref was always false).
+                -- Long-block any same-name same-z (within trap z tol) candidates
+                -- so the bot commits to its chosen crossing instead of bouncing.
+                local TRAV_Z_TOL_PARTNER = 1.0
+                local best_z = best_tpos:z()
+                for _, trav2 in ipairs(traversals) do
+                    if trav2 ~= best_trav then
+                        local tpos2 = trav2:get_position()
+                        if tpos2:x() >= min_x - 10 and tpos2:x() <= max_x + 10
+                            and tpos2:y() >= min_y - 10 and tpos2:y() <= max_y + 10
+                            and math.abs(tpos2:z() - best_z) <= TRAV_Z_TOL_PARTNER
+                        then
+                            local n2 = trav2:get_skin_name()
+                            local n2_up   = n2:match('Up') ~= nil
+                            local n2_down = n2:match('Down') ~= nil
+                            -- Only treat as ping-pong partner if it's also non-directional
+                            -- AND same family (matching skin name root). A nearby Up/Down
+                            -- gizmo is independent and shouldn't be blocked here.
+                            if not n2_up and not n2_down and n2 == best_name then
                                 local key2 = n2 .. utils.vec_to_string(tpos2)
                                 navigator.trap_blacklisted_trav[key2] = now + TRAV_TRAP_BL_DURATION
                                 opposite_blocked = opposite_blocked + 1
