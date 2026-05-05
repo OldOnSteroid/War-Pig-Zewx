@@ -57,6 +57,8 @@ gui.elements = {
     use_advance = create_checkbox(true, "use_advance"),
     use_falling_star = create_checkbox(true, "use_falling_star"),
     use_aoj = create_checkbox(true, "use_aoj"),
+    require_full_path_explore = create_checkbox(false, "require_full_path_explore"),
+    explore_path_budget_ms = slider_int:new(50, 500, 150, get_hash(plugin_label .. '_explore_path_budget_ms')),
     advanced_tree = tree_node:new(1),
     max_iteration = slider_int:new(250, 5000, 1500, get_hash(plugin_label .. '_' .. 'max_iteration')),
     debug_tree = tree_node:new(1),
@@ -98,6 +100,16 @@ function gui.render()
 
         end
         gui.elements.movement_tree:pop()
+    end
+    gui.elements.require_full_path_explore:render('Full path only (explore)',
+        'Skip any frontier the pathfinder cannot fully reach from the current position.\n' ..
+        'Prevents the bot from walking toward unreachable cells (cliffs, walls across floors).\n' ..
+        'Only applies to explorer targets — custom targets (kill, chest) are unaffected.')
+    if gui.elements.require_full_path_explore:get() then
+        gui.elements.explore_path_budget_ms:render('Path budget (ms)',
+            'A* time budget per frontier pathfind when Full path only is on.\n' ..
+            'Higher = handles longer winding paths correctly but costs more CPU per pick.\n' ..
+            '150ms is reasonable; 300ms+ will cause noticeable lag on busy floors.')
     end
     if gui.elements.debug_tree:push('Debug') then
         gui.elements.freeroam_keybind_toggle:render('Toggle explorer', 'enable freeroam explorer')

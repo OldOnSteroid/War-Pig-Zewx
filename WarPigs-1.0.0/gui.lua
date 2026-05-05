@@ -25,15 +25,16 @@ gui.elements = {
     use_teleport_transition = create_checkbox(false, 'use_teleport_transition'),
     run_pit_after_turnin    = create_checkbox(false, 'run_pit_after_turnin'),
     show_click_points = create_checkbox(false, 'show_click_points'),
-    -- 1920x1080 default is "no target set". Will be a no-op if both 0.
-    teleport_click_x = slider_int:new(0, 3840, 0,
+    -- 1920×1080: "no target set" while both are 0.
+    teleport_click_x = slider_int:new(0, 1920, 0,
         get_hash(plugin_label .. '_teleport_click_x')),
-    teleport_click_y = slider_int:new(0, 2160, 0,
+    teleport_click_y = slider_int:new(0, 1080, 0,
         get_hash(plugin_label .. '_teleport_click_y')),
-    -- F5 by default: hover the in-game target and press the bound key to
-    -- capture the current cursor screen position into teleport_click_x/y.
-    teleport_capture_keybind = keybind:new(0x74, false,
-        get_hash(plugin_label .. '_teleport_capture_keybind')),
+    -- 8K (7680×4320) pair — used when screen width ≥ 3840.
+    teleport_click_x_8k = slider_int:new(0, 7680, 0,
+        get_hash(plugin_label .. '_teleport_click_x_8k')),
+    teleport_click_y_8k = slider_int:new(0, 4320, 0,
+        get_hash(plugin_label .. '_teleport_click_y_8k')),
     verbose_logs  = create_checkbox(false, 'verbose_logs'),
     log_all_quests= create_checkbox(false, 'log_all_quests'),
 }
@@ -64,13 +65,16 @@ gui.render = function()
         'and click the X/Y target below. The orchestrator waits for the teleport\n' ..
         'channel to settle before letting the activity begin.')
     if gui.elements.use_teleport_transition:get() then
-        gui.elements.teleport_click_x:render('Teleport click X (px)',
-            'Pixel X for the teleport click target.')
-        gui.elements.teleport_click_y:render('Teleport click Y (px)',
-            'Pixel Y for the teleport click target.')
-        gui.elements.teleport_capture_keybind:render('Capture cursor key',
-            'Hover the in-game target (quest icon, map marker) and press this key\n' ..
-            'to set the X/Y above to the current cursor screen position. Default: F5.')
+        render_menu_header('1920x1080')
+        gui.elements.teleport_click_x:render('Click X',
+            'Pixel X of the teleport target at 1920x1080. Used when screen width < 3840.')
+        gui.elements.teleport_click_y:render('Click Y',
+            'Pixel Y of the teleport target at 1920x1080.')
+        render_menu_header('8K (7680x4320)')
+        gui.elements.teleport_click_x_8k:render('Click X',
+            'Pixel X of the teleport target at 8K. Used when screen width >= 3840.')
+        gui.elements.teleport_click_y_8k:render('Click Y',
+            'Pixel Y of the teleport target at 8K.')
         gui.elements.show_click_points:render('Show click position',
             'Draw a green crosshair at the configured click target so you can\n' ..
             'visually verify the position. Recent scripted clicks are also shown\n' ..

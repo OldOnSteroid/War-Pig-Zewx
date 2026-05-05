@@ -283,10 +283,21 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
         default_time_cap = 0.100
     end
     local time_cap = time_cap_override or default_time_cap
-    -- For tight per-call overrides (e.g. get_closeby_node feasibility checks),
-    -- skip the 0.080 lower bound so 8 attempts can stay under ~250ms total.
-    local time_lb  = time_cap_override and 0 or 0.080
+    -- When a per-call override is provided it acts as both the cap AND a
+    -- guaranteed floor, so winding paths with a short straight-line distance
+    -- aren't starved by the `goal_dist * 0.024` scaling term.
+    -- (get_closeby_node passes 0.040 as a hard upper bound; making it the
+    -- floor too is fine there since floor==cap → always exactly 0.040.)
+    -- Without override: keep the existing 0.080 floor so normal pathfinds
+    -- still get a minimum budget regardless of distance.
+    local time_lb    = time_cap_override or 0.080
     local time_limit = math.max(time_lb, math.min(time_cap, goal_dist * 0.024))
+    -- When per-call budget is provided, also raise iter_limit proportionally
+    -- so an early iter-cap doesn't fire before the time budget is consumed.
+    -- Estimate ~40μs per iteration (conservative). Cap at existing maximum.
+    if time_cap_override then
+        iter_limit = math.max(iter_limit, math.min(10000, math.floor(time_cap_override * 25000)))
+    end
 
     -- Skip the wall-ring penalty for far goals (>25u).  Cold cells beyond the
     -- explorer's f_radius=20 warm zone make the per-iter ring evaluation cost

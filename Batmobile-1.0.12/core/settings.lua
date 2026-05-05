@@ -19,7 +19,9 @@ local settings = {
     use_falling_star = false,
     use_aoj = false,
     log_level = gui.log_levels_enum['INFO'],
-    nav_viz = false
+    nav_viz = false,
+    require_full_path_explore = false,
+    explore_path_budget_ms = 150,
 }
 
 settings.update_settings = function ()
@@ -38,6 +40,8 @@ settings.update_settings = function ()
     settings.use_aoj = gui.elements.use_aoj:get()
     settings.log_level = gui.elements.log_level:get()
     settings.nav_viz   = gui.elements.nav_viz:get()
+    settings.require_full_path_explore = gui.elements.require_full_path_explore:get()
+    settings.explore_path_budget_ms    = gui.elements.explore_path_budget_ms:get()
 end
 
 return settings

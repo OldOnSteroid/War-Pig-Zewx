@@ -52,6 +52,71 @@ local PORTAL_DETECTION_RADIUS = 25
 -- upgrade_glyph / exit_pit.
 local PORTAL_BLOCK_RADIUS = 20
 
+-- ── Death-recovery: route back to last-seen portal after respawn ───────────
+-- Problem: PORTAL_DETECTION_RADIUS (25u) keeps the portal task from engaging
+-- prematurely during exploration. But when the player dies near a portal and
+-- respawns at the floor checkpoint (often hundreds of units away), the portal
+-- isn't detected and there are no frontiers in the area (already explored)
+-- so explore_pit does nothing — bot stalls.
+-- Fix: snapshot the most recently seen interactable portal's position.
+-- Detect respawn via a sudden position jump > 50u within the same world
+-- (world-change crossings are handled separately via portal_just_used).
+-- On respawn, long-path back toward the remembered portal until get_portal()
+-- starts seeing it again (then the regular flow takes over).
+local _last_portal_pos       = nil       -- vec3 of last interactable portal we saw
+local _last_portal_seen_t    = -math.huge
+local PORTAL_REMEMBER_TTL    = 60        -- seconds: a portal we saw recently is probably still there
+local _last_player_pos       = nil       -- per-frame tracking for jump detection
+local _respawn_recovery_pos  = nil       -- vec3 we're routing back to after detected respawn
+local _respawn_recovery_t    = -math.huge
+local _respawn_long_path_t   = -math.huge -- last time we issued a recovery long_path
+local RESPAWN_JUMP_THRESHOLD = 50         -- match Batmobile's nav.lua respawn threshold
+local RESPAWN_RECOVERY_TIMEOUT = 45       -- seconds: give up if portal not re-detected by then
+local RESPAWN_PATH_RETRY     = 3          -- seconds between recovery long_path retries
+
+local function update_death_recovery()
+    if not utils.player_in_pit() then
+        _last_player_pos      = nil
+        _respawn_recovery_pos = nil
+        return
+    end
+    local pos = get_player_position()
+    if not pos then return end
+    local now = get_time_since_inject()
+    if _last_player_pos ~= nil and not portal_just_used then
+        local jump = utils.distance(pos, _last_player_pos)
+        if jump > RESPAWN_JUMP_THRESHOLD then
+            -- Position jumped without a portal use: classify as death + respawn.
+            -- Only arm recovery if we have a recently-seen portal to chase.
+            if _last_portal_pos ~= nil
+                and (now - _last_portal_seen_t) <= PORTAL_REMEMBER_TTL
+            then
+                _respawn_recovery_pos = vec3:new(_last_portal_pos:x(), _last_portal_pos:y(), _last_portal_pos:z())
+                _respawn_recovery_t   = now
+                _respawn_long_path_t  = -math.huge
+                console.print(string.format(
+                    "[portal] respawn detected (jumped %.1f units) — routing back to last-seen portal at (%.1f,%.1f) seen %.0fs ago",
+                    jump, _respawn_recovery_pos:x(), _respawn_recovery_pos:y(),
+                    now - _last_portal_seen_t))
+            else
+                console.print(string.format(
+                    "[portal] respawn detected (jumped %.1f units) — no recent portal to recover to (last_seen=%s)",
+                    jump,
+                    _last_portal_pos and string.format("%.0fs ago", now - _last_portal_seen_t) or "never"))
+            end
+        end
+    end
+    _last_player_pos = vec3:new(pos:x(), pos:y(), pos:z())
+
+    -- Recovery timeout / cancel
+    if _respawn_recovery_pos ~= nil then
+        if (now - _respawn_recovery_t) > RESPAWN_RECOVERY_TIMEOUT then
+            console.print("[portal] respawn recovery timed out — clearing")
+            _respawn_recovery_pos = nil
+        end
+    end
+end
+
 local function portal_blocked(portal_actor)
     local ppos = portal_actor:get_position()
     local enemies = target_selector and target_selector.get_near_target_list
@@ -179,6 +244,17 @@ local get_portal = function ()
     if found_portal ~= nil then
         _portal_cache = found_portal
         _portal_cache_time = now
+        -- Remember position so we can route back here after a death + respawn
+        -- (PORTAL_DETECTION_RADIUS won't see the portal from the checkpoint).
+        local fp_pos = found_portal:get_position()
+        _last_portal_pos    = vec3:new(fp_pos:x(), fp_pos:y(), fp_pos:z())
+        _last_portal_seen_t = now
+        -- Successful (re-)detection cancels any in-flight respawn recovery —
+        -- the regular flow takes over from here.
+        if _respawn_recovery_pos ~= nil then
+            console.print("[portal] portal back in detection range — clearing respawn recovery")
+            _respawn_recovery_pos = nil
+        end
         return found_portal
     end
     _portal_cache = nil
@@ -186,9 +262,17 @@ local get_portal = function ()
     return nil
 end
 task.shouldExecute = function ()
-    return utils.player_in_pit() and
-        (get_portal() ~= nil or task.portal_found or
-        task.portal_exit + 1 >= get_time_since_inject())
+    if not utils.player_in_pit() then return false end
+    -- Drive death-recovery jump detection on every shouldExecute call (cheap;
+    -- gates inside on player_in_pit and same-world). When recovery is armed
+    -- we want this task to win the priority slot until the portal becomes
+    -- detectable again — explore_pit has nothing to do anyway since the
+    -- frontiers near the portal are already exhausted.
+    update_death_recovery()
+    return get_portal() ~= nil
+        or task.portal_found
+        or task.portal_exit + 1 >= get_time_since_inject()
+        or _respawn_recovery_pos ~= nil
 end
 -- Track which portal position we last issued a long-path to, so we don't recompute
 -- the uncapped A* every frame. Also track time of last issue so we can re-issue if
@@ -204,6 +288,37 @@ task.Execute = function ()
     orbwalker.set_clear_toggle(true)
     local portal = get_portal()
     if portal == nil then
+        -- Death-recovery branch: portal isn't visible (we're back at the
+        -- checkpoint after dying), but we remember where it was. Long-path
+        -- back; once we're within PORTAL_DETECTION_RADIUS, get_portal()
+        -- starts returning the actor and the regular flow takes over.
+        if _respawn_recovery_pos ~= nil then
+            local now = get_time_since_inject()
+            local dist = utils.distance(local_player, _respawn_recovery_pos)
+            BatmobilePlugin.pause(plugin_label)
+            BatmobilePlugin.update(plugin_label)
+            local need_repath = false
+            if not BatmobilePlugin.is_long_path_navigating()
+                and (now - _respawn_long_path_t) > RESPAWN_PATH_RETRY
+            then
+                need_repath = true
+            elseif _respawn_long_path_t == -math.huge then
+                need_repath = true
+            end
+            if need_repath then
+                console.print(string.format(
+                    "[portal] respawn recovery: long_path back to last-seen portal (dist=%.1f)",
+                    dist))
+                local started = BatmobilePlugin.navigate_long_path(plugin_label, _respawn_recovery_pos)
+                if not started then
+                    console.print("[portal] respawn recovery long_path FAILED — retrying")
+                end
+                _respawn_long_path_t = now
+            end
+            BatmobilePlugin.move(plugin_label)
+            task.status = string.format('respawn recovery (%.0f to portal)', dist)
+            return
+        end
         if task.portal_found then
             task.portal_found = false
             task.status = status_enum['RESETING']

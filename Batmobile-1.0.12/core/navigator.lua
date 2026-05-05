@@ -1341,7 +1341,9 @@ navigator.move = function ()
         end
         local dist_to_target = utils.distance(navigator.last_pos, navigator.target)
         console.print('[nav] pathfinding to=' .. utils.vec_to_string(navigator.target) .. ' dist=' .. string.format('%.1f', dist_to_target) .. ' custom=' .. tostring(navigator.is_custom_target))
-        local result, is_partial = path_finder.find_path(navigator.last_pos, navigator.target, navigator.is_custom_target)
+        local explore_time_cap = (settings.require_full_path_explore and not navigator.is_custom_target)
+            and (settings.explore_path_budget_ms / 1000.0) or nil
+        local result, is_partial = path_finder.find_path(navigator.last_pos, navigator.target, navigator.is_custom_target, nil, explore_time_cap)
 
         -- Reject very short partial paths to far targets: A* found only 1-2 steps
         -- before giving up, which means there's a wall/cliff/gap in the way and
@@ -1359,6 +1361,22 @@ navigator.move = function ()
             console.print('[nav] PARTIAL PATH REJECTED (plen=' .. #result ..
                 ' dist=' .. string.format('%.1f', dist_to_target) ..
                 ') — too short to make progress, falling through to failure')
+            result = {}
+            is_partial = false
+        end
+
+        -- Full-path-only mode: skip any partial path for explorer targets immediately.
+        -- Unlike the short-partial rejection above, this fires regardless of path length.
+        -- The frontier is skipped via the normal failure path (fail_count++) so the
+        -- explorer marks it visited and picks the next candidate.
+        if is_partial and #result > 0
+            and not navigator.is_custom_target
+            and navigator.last_trav == nil
+            and (navigator.trav_delay == nil or get_time_since_inject() > navigator.trav_delay)
+            and settings.require_full_path_explore
+        then
+            console.print('[nav] PARTIAL PATH SKIPPED (require_full_path_explore plen=' ..
+                #result .. ' dist=' .. string.format('%.1f', dist_to_target) .. ')')
             result = {}
             is_partial = false
         end
