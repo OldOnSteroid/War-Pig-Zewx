@@ -23,7 +23,6 @@ The reward turn-in step (`WarPlans_QST_TurnIn_Rewards`) is handled internally �
 |---|---|---|
 | **WarPigs-1.0.0** | Master orchestrator | The brain. Watches quests, enables/disables sub-plugins. Always required. |
 | **WarPug-1.0.0** | War Plan creator | Companion to WarPigs. When you're in Temis with no active WarPlans quests, auto-selects and confirms a new war plan path using the `warplan` API (Nightmare Dungeon nodes always excluded). Falls back to a configured reroll + confirm pixel click when no valid path exists. |
-| **AlfredTheButler-main** | Town services | Stash / salvage / sell / repair / restock between activities. Now ships with a **right-click stash fallback** for cases where the standard `move_item_to_stash` API stops making progress. |
 | **ArkhamAsylum-1.0.6** | The Pit | Pit runner. Requires Batmobile + Alfred + Looteer v2. |
 | **Batmobile-1.0.12** | (shared library) | Pathfinder/explorer used by ArkhamAsylum and WonderCity. Does nothing on its own. |
 | **HelltideRevamped-0.4** | Helltides | Maiden routes, chests, ore/herb, shrines, goblins, chaos rifts. |
@@ -35,6 +34,7 @@ The reward turn-in step (`WarPlans_QST_TurnIn_Rewards`) is handled internally �
 
 These are external prerequisites — install them separately into your scripts directory:
 
+- **Alfred the Butler** — town services (stash / salvage / sell / repair / restock between activities). Used by every activity plugin in the suite. No longer bundled — install separately into your scripts directory.
 - **Looteer v2** — loot pickup. Required by Arkham and WonderCity; recommended for everything else.
 - **Orbwalker** (with Clear toggled on + Block Orbwalker Movement enabled) — combat for HordeDev and a hard requirement for Infernal Hordes.
 
