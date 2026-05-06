@@ -26,6 +26,28 @@ local _anchor_long_path_target = nil  -- vec3 we last issued a long_path to
 local _anchor_path_issue_time = -math.huge
 local ANCHOR_PATH_RETRY_INTERVAL = 2  -- seconds between repath attempts
 
+-- Progress orb targeting
+local _orb_long_path_target = nil
+local _orb_path_issue_time = -math.huge
+local ORB_PATH_RETRY_INTERVAL = 2
+local ORB_ARRIVAL_DIST = 5
+
+local function find_nearest_progress_orb(player_pos)
+    local actors = actors_manager:get_all_actors()
+    local nearest, nearest_dist = nil, math.huge
+    for _, actor in pairs(actors) do
+        if actor:get_skin_name() == 'TWR_ProgressOrb' then
+            local pos = actor:get_position()
+            local dist = player_pos:dist_to(pos)
+            if dist < nearest_dist then
+                nearest = actor
+                nearest_dist = dist
+            end
+        end
+    end
+    return nearest, nearest_dist
+end
+
 -- Speed mode: charge-through state
 local speed_target = nil              -- vec3 through-point we're heading toward
 local speed_reject_time = -math.huge  -- timestamp of last rejection
@@ -87,6 +109,7 @@ end
 task.Execute = function ()
     local local_player = get_local_player()
     if not local_player then return end
+    local player_pos = get_player_position()
     orbwalker.set_clear_toggle(true)
     orbwalker.set_block_movement(true)
 
@@ -161,8 +184,41 @@ task.Execute = function ()
     end
     _anchor_long_path_target = nil
 
+    -- Progress orbs (Choron's Soul): move directly to them instead of exploring
+    do
+        local orb, orb_dist = find_nearest_progress_orb(player_pos)
+        if orb then
+            if orb_dist > ORB_ARRIVAL_DIST then
+                local orb_pos = orb:get_position()
+                BatmobilePlugin.pause(plugin_label)
+                local now = get_time_since_inject()
+                local need_repath = _orb_long_path_target == nil
+                    or _orb_long_path_target:dist_to(orb_pos) > 3
+                    or (not BatmobilePlugin.is_long_path_navigating()
+                        and (now - _orb_path_issue_time) > ORB_PATH_RETRY_INTERVAL)
+                if need_repath then
+                    local started = BatmobilePlugin.navigate_long_path(plugin_label, orb_pos)
+                    if started then
+                        _orb_long_path_target = vec3:new(orb_pos:x(), orb_pos:y(), orb_pos:z())
+                        _orb_path_issue_time = now
+                        console.print(string.format('[explore_pit] progress orb %.1f away — navigating', orb_dist))
+                    else
+                        _orb_long_path_target = nil
+                        _orb_path_issue_time = now
+                    end
+                end
+                BatmobilePlugin.update(plugin_label)
+                BatmobilePlugin.move(plugin_label)
+                task.status = string.format('moving to progress orb (%.1f)', orb_dist)
+                return
+            end
+            _orb_long_path_target = nil
+        else
+            _orb_long_path_target = nil
+        end
+    end
+
     if settings.speed_mode then
-        local player_pos = get_player_position()
         local now = get_time_since_inject()
 
         -- Active charge: keep heading toward through-point

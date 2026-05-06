@@ -45,6 +45,11 @@ local ALTAR_TETHER = 15.0
 
 local task = { name = "Kill Monsters" }
 
+function task.reset()
+    orbwalker.set_clear_toggle(false)
+    orbwalker.set_block_movement(false)
+end
+
 function task.shouldExecute()
     if not in_target_boss_zone() then return false end
     if not tracker.altar_activated then return false end
@@ -53,6 +58,9 @@ function task.shouldExecute()
 end
 
 function task.Execute()
+    orbwalker.set_clear_toggle(true)
+    orbwalker.set_block_movement(true)
+
     -- Always chase suppressor orbs (need to burst them to unblock combat)
     local suppressor = utils.get_suppressor()
     if suppressor then
