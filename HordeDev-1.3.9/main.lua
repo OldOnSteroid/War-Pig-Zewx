@@ -69,6 +69,13 @@ InfernalHordesPlugin = {
         end
         return "IDLE"
     end,
+    -- True once all chests have been looted this run. WarPigs uses this to
+    -- delay disabling HordeDev when the player leaves BSK temporarily for
+    -- a mid-run salvage trip (Alfred TPs to town → player exits BSK →
+    -- disable_when would fire too early without this guard).
+    chests_done = function()
+        return tracker.finished_chest_looting == true
+    end,
     getSettings = function (setting)
         if settings[setting] then
             return settings[setting]

@@ -30,18 +30,13 @@ local render_pulse = function()
     -- Click-position overlays are shown regardless of enable state so the
     -- user can calibrate coordinates with the plugin paused.
     if gui.elements.show_click_points:get() then
-        -- Read directly from the active resolution's sliders every frame so
-        -- crosshairs track the slider in real-time while dragging.
-        local res     = gui.pick_resolution(gui.get_screen_width())
-        local sl      = gui.res_sliders[res.key]
-        local rx, ry  = sl.reroll_x:get(),  sl.reroll_y:get()
-        local cx, cy  = sl.confirm_x:get(), sl.confirm_y:get()
-        if rx > 0 and ry > 0 then
-            draw_crosshair(rx, ry, 'Reroll', COL_CROSSHAIR)
-        end
-        if cx > 0 and cy > 0 then
-            draw_crosshair(cx, cy, 'RerollConfirm', COL_CROSSHAIR)
-        end
+        -- Always read from the combo-selected resolution so the crosshairs
+        -- track whichever slider set the user is currently editing.
+        -- (0,0) renders at the top-left corner as a visible starting reference.
+        local idx = math.max(0, math.min(#gui.RESOLUTIONS - 1, gui.elements.res_combo:get()))
+        local sl  = gui.res_sliders[gui.RESOLUTIONS[idx + 1].key]
+        draw_crosshair(sl.reroll_x:get(),  sl.reroll_y:get(),  'Reroll',        COL_CROSSHAIR)
+        draw_crosshair(sl.confirm_x:get(), sl.confirm_y:get(), 'RerollConfirm', COL_CROSSHAIR)
     end
 
     -- Fading yellow circle for each recent scripted click (~6s TTL)

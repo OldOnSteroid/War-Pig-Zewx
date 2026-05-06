@@ -41,7 +41,7 @@ for _, res in ipairs(gui.RESOLUTIONS) do
     }
 end
 
--- ── Screen-width helper (used both here and in settings.lua via gui) ──────────
+-- ── Screen helpers (used both here and in settings.lua via gui) ──────────────
 function gui.get_screen_width()
     if utility and type(utility.get_screen_width) == 'function' then
         local ok, w = pcall(utility.get_screen_width)
@@ -50,14 +50,24 @@ function gui.get_screen_width()
     return 1920
 end
 
--- Returns the resolution preset whose width is closest to `screen_w`.
-function gui.pick_resolution(screen_w)
-    local best, best_diff = gui.RESOLUTIONS[1], math.huge
+function gui.get_screen_height()
+    if utility and type(utility.get_screen_height) == 'function' then
+        local ok, h = pcall(utility.get_screen_height)
+        if ok and type(h) == 'number' then return h end
+    end
+    return 1080
+end
+
+-- Returns the resolution preset closest to (screen_w, screen_h).
+-- Width is weighted 2× over height so landscape variants resolve correctly.
+function gui.pick_resolution(screen_w, screen_h)
+    screen_h = screen_h or 0
+    local best, best_score = gui.RESOLUTIONS[1], math.huge
     for _, res in ipairs(gui.RESOLUTIONS) do
-        local diff = math.abs(res.w - screen_w)
-        if diff < best_diff then
-            best      = res
-            best_diff = diff
+        local score = math.abs(res.w - screen_w) * 2 + math.abs(res.h - screen_h)
+        if score < best_score then
+            best       = res
+            best_score = score
         end
     end
     return best
@@ -95,7 +105,7 @@ gui.render = function()
     end
 
     -- Detect which preset will actually be used at runtime.
-    local active_res   = gui.pick_resolution(gui.get_screen_width())
+    local active_res   = gui.pick_resolution(gui.get_screen_width(), gui.get_screen_height())
     local active_label = active_res.label
 
     render_menu_header('Click position calibration  [active: ' .. active_label .. ']')

@@ -26,7 +26,7 @@ settings.update_settings = function()
     settings.verbose_logs      = gui.elements.verbose_logs:get()
 
     -- Pick the resolution preset whose width best matches the actual screen.
-    local res     = gui.pick_resolution(gui.get_screen_width())
+    local res     = gui.pick_resolution(gui.get_screen_width(), gui.get_screen_height())
     local sliders = gui.res_sliders[res.key]
     settings.reroll_click_x   = sliders.reroll_x:get()
     settings.reroll_click_y   = sliders.reroll_y:get()

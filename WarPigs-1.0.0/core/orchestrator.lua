@@ -250,6 +250,15 @@ orchestrator.quest_plugin_map = {
     -- BSK world (S05_BSK_Prototype02) or 60s elapse as a safety cap.
     WarPlans_QST_InfernalHordes = {
         plugin = 'InfernalHordesPlugin',
+        -- Quest vanishes when the wave bosses die, but HordeDev still has to
+        -- open chests and pick up loot. Defer disable until BOTH conditions:
+        --   (a) player has left BSK (normal post-horde exit), AND
+        --   (b) HordeDev reports chests done.
+        -- The (b) guard prevents a false-positive when Alfred TPs the player
+        -- to town mid-chest-run for a salvage pass — without it, leaving BSK
+        -- for salvage would immediately free the disable and WarPigs would
+        -- teleport to the next quest, skipping the remaining chests.
+        -- 60s safety cap ensures a stuck run can't block the orchestrator.
         disable_when = (function()
             local defer_start
             return function()
@@ -262,8 +271,15 @@ orchestrator.quest_plugin_map = {
                 local in_bsk = type(name) == 'string'
                     and name:find('BSK', 1, true) ~= nil
                 if not in_bsk then
-                    defer_start = nil
-                    return true
+                    local p = _G.InfernalHordesPlugin
+                    local done = p and type(p.chests_done) == 'function' and p.chests_done()
+                    if done then
+                        defer_start = nil
+                        return true
+                    end
+                    -- Chests not done yet: player left BSK temporarily (salvage
+                    -- trip). Keep HordeDev alive so it can return and finish.
+                    -- Fall through to safety timer below.
                 end
                 defer_start = defer_start or get_time_since_inject()
                 if get_time_since_inject() - defer_start >= 60 then
