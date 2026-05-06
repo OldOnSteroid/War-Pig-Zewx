@@ -669,7 +669,7 @@ local should_do_maiden
 -- find_closest_target() and scan_and_remember_chests() calls within the same frame.
 local cached_actors = nil
 local cached_actors_time = 0
-local ACTOR_CACHE_TTL = 0.5
+local ACTOR_CACHE_TTL = 1.0
 
 local function get_cached_actors()
     local now = get_time_since_inject()
@@ -742,30 +742,10 @@ should_do_maiden = function()
     return true, nil
 end
 
--- DEBUG: scan for all chest actors every 2 seconds
-local last_chest_debug_time = 0
-local function debug_chest_scan()
-    local now = get_time_since_inject()
-    if now - last_chest_debug_time < 2 then return end
-    last_chest_debug_time = now
 
-    local current_cinders = get_helltide_coin_cinders()
-    local actors = get_cached_actors()
-
-    for _, actor in pairs(actors) do
-        local skin = actor:get_skin_name()
-        for chest_name, cost in pairs(enums.chest_types) do
-            if skin:match(chest_name) then
-                local dist = utils.distance_to(actor:get_position())
-                local interactable = actor:is_interactable()
-                console.print("[CHEST DEBUG] " .. chest_name .. " | dist: " .. string.format("%.1f", dist) .. " | interactable: " .. tostring(interactable) .. " | cinders: " .. current_cinders .. "/" .. cost)
-            end
-        end
-    end
-end
 
 local _fct_cache = {}          -- pattern -> { result, time }
-local FCT_CACHE_TTL = 0.5      -- seconds before re-scanning actors for the same pattern
+local FCT_CACHE_TTL = 1.0      -- seconds before re-scanning actors for the same pattern
 
 local function invalidate_fct_cache()
     _fct_cache = {}
@@ -1079,6 +1059,7 @@ local function check_events(self)
     -- Priority 1: Cinder chests when player can afford one
     if settings.helltide_chest then
         local current_cinders = get_helltide_coin_cinders()
+        local now_bl = get_time_since_inject()
         for chest_name, cost in pairs(enums.chest_types) do
             if current_cinders >= cost then
                 target = find_closest_target(chest_name)
@@ -1086,6 +1067,11 @@ local function check_events(self)
                     found_chest = chest_name
                     found_chest_position = target:get_position()
                     local key = chest_key(chest_name, found_chest_position)
+                    local bl = chest_temp_blacklist[key]
+                    if bl then
+                        if bl > now_bl then goto continue_chest_scan end
+                        chest_temp_blacklist[key] = nil
+                    end
                     if remembered_chests[key] then
                         console.print(string.format("[CHEST RECALL] Opening previously remembered %s", chest_name))
                         remembered_chests[key] = nil
@@ -1097,6 +1083,7 @@ local function check_events(self)
                     return
                 end
             end
+            ::continue_chest_scan::
         end
 
         -- Scan for unaffordable chests in range and remember them
@@ -1302,7 +1289,6 @@ local helltide_task = {
         perf.report()
         perf.inc("state_" .. self.current_state)
         perf.start("hr_tick")
-        debug_chest_scan() -- DEBUG: remove when done testing
         self.name = "Explore Helltide (" .. self.current_state .. ")"
         local lp = get_local_player()
         local is_dead = lp and lp:is_dead()
@@ -1327,13 +1313,21 @@ local helltide_task = {
             end
         end
 
+        local now = get_time_since_inject()
+
         -- Zone-override walk-to-entry guard.  When WarPigs (or another external
         -- trigger) drops us into a zone like Skov_Celestia where the standard
         -- waypoint patrol can't run, we first walk to the override's entry vec3
         -- so the helltide buff applies and there's something for Batmobile to
         -- free-explore.  Once the buff is up, fall through to the normal flow
         -- (which then hits the no_waypoint_region fallback).
-        local override = zone_overrides.get_current()
+        -- Cache the result: world+zone don't change mid-session so re-checking
+        -- get_current_world() every tick is wasted overhead.
+        if not self._override_cache_time or (now - self._override_cache_time) > 5 then
+            self._override_cache       = zone_overrides.get_current()
+            self._override_cache_time  = now
+        end
+        local override = self._override_cache
         if override and not utils.is_in_helltide() then
             local lp_pos = lp and lp:get_position()
             local dist = lp_pos and lp_pos:dist_to(override.entry) or math.huge
@@ -1442,7 +1436,7 @@ local helltide_task = {
         end
 
         -- Detect leaving the zone mid-session (buff lost but hour still active → walk back, don't teleport)
-        if not utils.is_in_helltide() and utils.helltide_active()
+        if not in_ht_now and utils.helltide_active()
             and self.current_state ~= helltide_state.RETURN_TO_HELLTIDE
             and self.current_state ~= helltide_state.BACK_TO_TOWN then
             console.print(string.format("[HELLTIDE] Left helltide zone at (%.1f,%.1f) — navigating back via backtrack",
@@ -1659,7 +1653,7 @@ local helltide_task = {
         end
 
         local now = get_time_since_inject()
-        local CHECK_EVENTS_TTL = 0.5
+        local CHECK_EVENTS_TTL = 1.0
         if not self._last_check_events_time or now - self._last_check_events_time >= CHECK_EVENTS_TTL then
             self._last_check_events_time = now
             perf.start("check_events")
@@ -2159,6 +2153,34 @@ local helltide_task = {
             console.print(string.format("[HELLTIDE CHEST] %s too far (%.0f > %d), giving up", found_chest, dist_to_saved, WAYPOINT_MAX_DIST))
             found_chest = nil
             found_chest_position = nil
+            chest_stuck_reset()
+            clear_movement()
+            self.current_state = helltide_state.EXPLORE_HELLTIDE
+            return
+        end
+
+        -- Stuck-near-unreachable detection: mirrors move_to_remembered_chest logic.
+        -- If we're within CHEST_STUCK_RANGE but haven't closed CHEST_STUCK_PROGRESS
+        -- meters in CHEST_STUCK_WINDOW seconds, the chest is likely on a cliff or
+        -- behind a wall we can't path through. Blacklist it and resume patrol.
+        local now_t = get_time_since_inject()
+        local hkey  = chest_key(found_chest, found_chest_position)
+        if _chest_stuck_key ~= hkey then
+            _chest_stuck_key  = hkey
+            _chest_stuck_t    = now_t
+            _chest_stuck_dist = dist_to_saved
+        elseif dist_to_saved <= _chest_stuck_dist - CHEST_STUCK_PROGRESS then
+            _chest_stuck_t    = now_t
+            _chest_stuck_dist = dist_to_saved
+        elseif dist_to_saved <= CHEST_STUCK_RANGE
+                and (now_t - _chest_stuck_t) >= CHEST_STUCK_WINDOW then
+            console.print(string.format(
+                "[HELLTIDE CHEST] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
+                found_chest, dist_to_saved, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
+            chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+            found_chest = nil
+            found_chest_position = nil
+            chest_stuck_reset()
             clear_movement()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return

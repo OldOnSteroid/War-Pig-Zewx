@@ -77,13 +77,21 @@ function utils.is_inventory_full()
     return get_local_player():get_item_count() == 33
 end
 
+local _iih_result = false
+local _iih_time   = -math.huge
+local IIH_TTL     = 0.25  -- re-check buffs at most 4x per second
 function utils.is_in_helltide()
+    local now = get_time_since_inject()
+    if now - _iih_time < IIH_TTL then return _iih_result end
+    _iih_time = now
     local buffs = get_local_player():get_buffs()
     for _, buff in ipairs(buffs) do
-        if buff.name_hash == 1066539 then -- helltuide ID
-        return true
+        if buff.name_hash == 1066539 then
+            _iih_result = true
+            return true
         end
     end
+    _iih_result = false
     return false
 end
 

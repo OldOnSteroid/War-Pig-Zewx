@@ -91,12 +91,15 @@ explorer.direction_penalty = direction_penalty
 -- Bucket size tuned to scan box (~26 units): one query touches ~4 buckets.
 local FRONTIER_CHUNK = 16
 local frontier_chunks = {}  -- "cx,cy" -> { node_str = true, ... }
+-- Cap total frontiers to prevent open-world explosion (helltide reaches 7500-9700; pit peaks ~2000)
+local MAX_FRONTIERS = 4000
 
 local function chunk_key(x, y)
     return tostring(math.floor(x / FRONTIER_CHUNK)) .. ',' .. tostring(math.floor(y / FRONTIER_CHUNK))
 end
 
 local add_frontier = function (node_str, node)
+    if explorer.frontier_count >= MAX_FRONTIERS then return end
     explorer.frontier[node_str] = explorer.frontier_index
     explorer.frontier_node[node_str] = node
     explorer.frontier_order[explorer.frontier_index] = node_str
@@ -684,7 +687,8 @@ explorer.update = function (local_player)
                     add_visited(node_str)
                     remove_retry(node_str)
                     remove_frontier(node_str)
-                elseif explorer.frontier[node_str] == nil and prev_scanned ~= false then
+                elseif explorer.frontier[node_str] == nil and prev_scanned ~= false
+                        and explorer.frontier_count < MAX_FRONTIERS then
                     if explorer.retry[node_str] ~= nil then
                         remove_visited(node_str)
                         remove_retry(node_str)
