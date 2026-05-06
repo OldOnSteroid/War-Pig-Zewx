@@ -15,12 +15,16 @@ gui.plugin_version = plugin_version
 -- Settings picks the closest match to the actual screen width at runtime.
 -- The combo in the GUI controls which preset you are currently configuring.
 gui.RESOLUTIONS = {
-    { label = '1920 \xc3\x97 1080  (Full HD)',       w = 1920, h = 1080, key = '1080p'  },
-    { label = '2560 \xc3\x97 1440  (QHD / 2K)',      w = 2560, h = 1440, key = '1440p'  },
-    { label = '3440 \xc3\x97 1440  (UltraWide QHD)', w = 3440, h = 1440, key = '1440uw' },
-    { label = '3840 \xc3\x97 2160  (4K UHD)',        w = 3840, h = 2160, key = '4k'     },
-    { label = '5120 \xc3\x97 1440  (Super UltraWide)',w = 5120, h = 1440, key = '5120uw' },
-    { label = '7680 \xc3\x97 4320  (8K UHD)',        w = 7680, h = 4320, key = '8k'     },
+    { label = '1920 \xc3\x97 1080  (Full HD)',           w = 1920, h = 1080, key = '1080p'   },
+    { label = '1920 \xc3\x97 1200  (WUXGA)',             w = 1920, h = 1200, key = '1200p'   },
+    { label = '2560 \xc3\x97 1080  (UltraWide FHD)',     w = 2560, h = 1080, key = '1080uw'  },
+    { label = '2560 \xc3\x97 1440  (QHD / 2K)',          w = 2560, h = 1440, key = '1440p'   },
+    { label = '2560 \xc3\x97 1600  (WQXGA)',             w = 2560, h = 1600, key = '1600p'   },
+    { label = '3440 \xc3\x97 1440  (UltraWide QHD)',     w = 3440, h = 1440, key = '1440uw'  },
+    { label = '3840 \xc3\x97 1600  (UltraWide QHD+)',    w = 3840, h = 1600, key = '1600uw'  },
+    { label = '3840 \xc3\x97 2160  (4K UHD)',            w = 3840, h = 2160, key = '4k'      },
+    { label = '5120 \xc3\x97 1440  (Super UltraWide)',   w = 5120, h = 1440, key = '5120uw'  },
+    { label = '7680 \xc3\x97 4320  (8K UHD)',            w = 7680, h = 4320, key = '8k'      },
 }
 
 -- Per-resolution slider pairs: reroll X/Y and confirm X/Y.

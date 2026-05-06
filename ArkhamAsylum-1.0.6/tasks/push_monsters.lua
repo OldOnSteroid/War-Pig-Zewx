@@ -11,6 +11,7 @@ local PUSH_MIN_PULL_DIST = 8       -- ignore clusters already on top of us
 local PUSH_ARRIVAL_DIST = 5        -- close enough to pull target
 local PUSH_STUCK_TIMEOUT = 5       -- seconds without movement -> unstuck recovery
 local PUSH_NAV_TIMEOUT = 12        -- seconds without nav progress -> abandon target
+local PUSH_CLUSTER_COOLDOWN = 30   -- seconds to ignore a cluster after nav-timeout
 
 local status_enum = {
     IDLE = 'idle',
@@ -29,6 +30,30 @@ local actively_pulling = false      -- prevents flickering between push/kill
 local nav_tracking = { pos = nil, time = 0, dist = nil }
 local stuck_pos = nil
 local stuck_time = 0
+
+-- Cluster cooldown: positions abandoned due to nav-timeout are ignored for
+-- PUSH_CLUSTER_COOLDOWN seconds. Keyed on a 5-unit grid cell so nearby
+-- centroid drift doesn't escape the blacklist.
+local cluster_cooldown = {}
+local function cluster_key(pos)
+    return math.floor(pos:x() / 5) .. ',' .. math.floor(pos:y() / 5)
+end
+local function mark_cluster_unreachable(pos)
+    local key = cluster_key(pos)
+    cluster_cooldown[key] = get_time_since_inject() + PUSH_CLUSTER_COOLDOWN
+    console.print(string.format('[push] cluster at (%.1f,%.1f) cooled down for %ds',
+        pos:x(), pos:y(), PUSH_CLUSTER_COOLDOWN))
+end
+local function is_cluster_on_cooldown(pos)
+    local key = cluster_key(pos)
+    local expiry = cluster_cooldown[key]
+    if expiry == nil then return false end
+    if get_time_since_inject() > expiry then
+        cluster_cooldown[key] = nil
+        return false
+    end
+    return true
+end
 
 local ignore_list = {
     ['S11_BabyBelial_Apparition'] = true
@@ -171,6 +196,8 @@ local function find_pull_target(player_pos)
         -- Skip clusters too small to be worth pulling toward
         if cluster.weighted < min_weight then goto next_cluster end
         local centroid = vec3:new(cluster.cx, cluster.cy, cluster.cz)
+        -- Skip clusters that were recently abandoned due to nav timeout
+        if is_cluster_on_cooldown(centroid) then goto next_cluster end
         local dist = utils.distance(player_pos, centroid)
         if dist < PUSH_MIN_PULL_DIST then goto next_cluster end
 
@@ -217,6 +244,15 @@ task.shouldExecute = function()
     if has_boss then
         actively_pulling = false
         pull_target = nil
+        return false
+    end
+
+    -- Yield to the trap escape system. While trapped, attempt_escape owns
+    -- traversal routing; competing set_target calls override the escape route
+    -- and lock the bot on the same unreachable cluster indefinitely.
+    if BatmobilePlugin.is_trapped and BatmobilePlugin.is_trapped() then
+        pull_target = nil
+        actively_pulling = false
         return false
     end
 
@@ -275,6 +311,7 @@ task.Execute = function()
                     nav_tracking.time = now
                 elseif now - nav_tracking.time > PUSH_NAV_TIMEOUT then
                     console.print("[push] no nav progress for " .. PUSH_NAV_TIMEOUT .. "s, abandoning target")
+                    mark_cluster_unreachable(pull_target)
                     pull_target = nil
                     actively_pulling = false
                     nav_tracking.pos = nil
@@ -353,6 +390,7 @@ task.Execute = function()
         local accepted = BatmobilePlugin.set_target(plugin_label, pull_target, false)
         if accepted == false then
             console.print("[push] initial pull target rejected")
+            mark_cluster_unreachable(pull_target)
             pull_target = nil
             actively_pulling = false
         else

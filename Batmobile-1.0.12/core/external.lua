@@ -146,7 +146,17 @@ external.navigate_long_path = function(caller, target)
 end
 
 -- True while long path navigation is actively driving the navigator.
+-- Auto-stops (returns false) when the navigator's target was cleared
+-- externally (e.g. post-traversal-cross in attempt_escape) while navigating
+-- was still true — this leaves navigator.target=nil every frame and the
+-- caller stalls because it trusts this flag as "still in progress". Clearing
+-- the flag lets callers retry navigate_long_path immediately.
 external.is_long_path_navigating = function()
+    if long_path.navigating and navigator.target == nil then
+        console.print('[LONG PATH] target cleared externally while navigating — auto-stopping so caller can repath')
+        long_path.stop_navigation()
+        return false
+    end
     return long_path.navigating
 end
 

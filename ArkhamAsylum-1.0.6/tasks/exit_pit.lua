@@ -48,11 +48,16 @@ local exit_with_debounce = function (delay)
 end
 
 task.shouldExecute = function ()
+    if not utils.player_in_pit() then return false end
+    -- Reset timer is a hard override — always exit even if looting or waiting
+    -- at the anchor for a glyphstone that may never spawn.
+    if tracker.pit_start_time + settings.reset_timeout < get_time_since_inject() then
+        console.print(string.format('[exit_pit] reset timer expired (%.0fs) — forcing exit',
+            get_time_since_inject() - tracker.pit_start_time))
+        return true
+    end
     return not utils.is_looting() and
-        utils.player_in_pit() and
-        (tracker.pit_start_time + settings.reset_timeout < get_time_since_inject() or
-        utils.get_glyph_upgrade_gizmo() ~= nil or BatmobilePlugin.is_done())
-
+        (utils.get_glyph_upgrade_gizmo() ~= nil or BatmobilePlugin.is_done())
 end
 task.Execute = function ()
     local local_player = get_local_player()
