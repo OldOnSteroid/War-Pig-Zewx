@@ -18,23 +18,10 @@ gui.elements = {
     -- 0x0A is the harness convention for "no key bound yet" — same default as HordeDev.
     keybind_toggle= keybind:new(0x0A, true, get_hash(plugin_label .. '_keybind_toggle')),
     -- Teleport-transition: when ON, after the previous quest's plugin is
-    -- disabled and BEFORE the next plugin is enabled, send Tab once and
-    -- then click the configured pixel target (typically a quest icon /
-    -- map marker that initiates a teleport). The orchestrator waits for
-    -- the teleport channel to settle before enabling the incoming plugin.
+    -- disabled and BEFORE the next plugin is enabled, call
+    -- warplan.teleport_to_activity() and wait for the channel to settle.
     use_teleport_transition = create_checkbox(false, 'use_teleport_transition'),
     run_pit_after_turnin    = create_checkbox(false, 'run_pit_after_turnin'),
-    show_click_points = create_checkbox(false, 'show_click_points'),
-    -- 1920×1080: "no target set" while both are 0.
-    teleport_click_x = slider_int:new(0, 1920, 0,
-        get_hash(plugin_label .. '_teleport_click_x')),
-    teleport_click_y = slider_int:new(0, 1080, 0,
-        get_hash(plugin_label .. '_teleport_click_y')),
-    -- 8K (7680×4320) pair — used when screen width ≥ 3840.
-    teleport_click_x_8k = slider_int:new(0, 7680, 0,
-        get_hash(plugin_label .. '_teleport_click_x_8k')),
-    teleport_click_y_8k = slider_int:new(0, 4320, 0,
-        get_hash(plugin_label .. '_teleport_click_y_8k')),
     verbose_logs  = create_checkbox(false, 'verbose_logs'),
     log_all_quests= create_checkbox(false, 'log_all_quests'),
 }
@@ -60,26 +47,9 @@ gui.render = function()
     end
 
     gui.elements.use_teleport_transition:render('Use teleport',
-        'Before each new quest activity starts (initial enable, plugin → plugin\n' ..
-        'transition, AND the turn-in script), send Tab once (open map / quest list)\n' ..
-        'and click the X/Y target below. The orchestrator waits for the teleport\n' ..
-        'channel to settle before letting the activity begin.')
-    if gui.elements.use_teleport_transition:get() then
-        render_menu_header('1920x1080')
-        gui.elements.teleport_click_x:render('Click X',
-            'Pixel X of the teleport target at 1920x1080. Used when screen width < 3840.')
-        gui.elements.teleport_click_y:render('Click Y',
-            'Pixel Y of the teleport target at 1920x1080.')
-        render_menu_header('8K (7680x4320)')
-        gui.elements.teleport_click_x_8k:render('Click X',
-            'Pixel X of the teleport target at 8K. Used when screen width >= 3840.')
-        gui.elements.teleport_click_y_8k:render('Click Y',
-            'Pixel Y of the teleport target at 8K.')
-        gui.elements.show_click_points:render('Show click position',
-            'Draw a green crosshair at the configured click target so you can\n' ..
-            'visually verify the position. Recent scripted clicks are also shown\n' ..
-            'as a fading yellow circle for ~6s after firing.')
-    end
+        'After each activity ends, call warplan.teleport_to_activity() before\n' ..
+        'starting the next plugin. The orchestrator waits for the channel to\n' ..
+        'settle before letting the next activity begin.')
 
     gui.elements.run_pit_after_turnin:render('Run pit after turn-in',
         'Once at least one WarPlans turn-in has completed, fill any gap with no\n' ..

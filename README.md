@@ -22,6 +22,7 @@ The reward turn-in step (`WarPlans_QST_TurnIn_Rewards`) is handled internally �
 | Plugin | Activity | Notes |
 |---|---|---|
 | **WarPigs-1.0.0** | Master orchestrator | The brain. Watches quests, enables/disables sub-plugins. Always required. |
+| **WarPug-1.0.0** | War Plan creator | Companion to WarPigs. When you're in Temis with no active WarPlans quests, auto-selects and confirms a new war plan path using the `warplan` API (Nightmare Dungeon nodes always excluded). Falls back to a configured reroll + confirm pixel click when no valid path exists. |
 | **AlfredTheButler-main** | Town services | Stash / salvage / sell / repair / restock between activities. Now ships with a **right-click stash fallback** for cases where the standard `move_item_to_stash` API stops making progress. |
 | **ArkhamAsylum-1.0.6** | The Pit | Pit runner. Requires Batmobile + Alfred + Looteer v2. |
 | **Batmobile-1.0.12** | (shared library) | Pathfinder/explorer used by ArkhamAsylum and WonderCity. Does nothing on its own. |
@@ -85,6 +86,10 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 ## Changelog
 
 ### 2026-05-05
+- **NEW: WarPug — War Plan creator**. New plugin in the suite. When you're in Temis with no active `WarPlans_QST_*` quests, WarPug auto-selects and confirms a new war plan path through the host's `warplan` API. Nightmare Dungeon nodes (`Warplans_NightmareDungeons`) are always excluded. If no valid path exists, falls back to a configured reroll + confirm pixel click — same dual-resolution slider pattern as WarPigs (1920×1080 + 8K, picked by `utility.get_screen_width()`). Capped at 10 reroll attempts per cycle.
+- **WarPigs: teleport sequence simplified to a single API call**. The whole `WAIT_TAB → WAIT_CLICK → WAIT_SETTLE` state machine, post-settle "still in town?" retry verifier, click-position overlay, F5 capture-cursor keybind, and dual-resolution click sliders are **gone**. Replaced with one call to `warplan.teleport_to_activity()` and a 5 s settle. Same gating as before (incoming activity visible for 2.5 s, Alfred idle), just no more pixel-click voodoo. The "Use teleport" toggle stays — flip it on and the orchestrator handles it.
+- **ArkhamAsylum: glyphstone orbwalker suppression is now opt-in**. New "Disable orbwalker at glyphstone" toggle (default off). Yesterday's auto-suppression was firing for users who actually wanted skills active during the upgrade.
+- **WonderCity: enticement_timeout setting now actually applies**. The slider value was being read from the GUI but never copied into runtime settings.
 - **ArkhamAsylum: stop nuking the glyphstone**. `upgrade_glyph` now flips `orbwalker.set_clear_toggle(false)` whenever the boss is dead and the player is within 5 m of the glyphstone, so skill casts don't trigger while the bot is interacting. `exit_pit` flips it back on before firing the teleport channel.
 - **Batmobile: lock out traversals during a custom-target final approach**. When a custom target (e.g. a portal on a ledge) had been returning partial paths and then suddenly resolves to a full path, the player has clearly just landed on the same surface as the target. New `all_trav_blocked_until` (60 s) suppresses every traversal selection for the duration of the approach, so nothing yanks the bot back across a ledge it just crossed.
 

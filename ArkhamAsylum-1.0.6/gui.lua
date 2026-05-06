@@ -82,6 +82,7 @@ gui.elements = {
     confirm_delay = slider_int:new(1, 300, 5, get_hash(plugin_label .. '_' .. 'confirm_delay')),
     use_magoogle_tool = create_checkbox(false, 'use_magoogle_tool'),
     follower_explore = create_checkbox(false, 'follower_explore'),
+    disable_orbwalker_at_glyphstone = create_checkbox(false, 'disable_orbwalker_at_glyphstone'),
     use_long_path = create_checkbox(false, 'use_long_path'),
     speed_mode = create_checkbox(false, 'speed_mode'),
     push_mode = create_checkbox(false, 'push_mode'),
@@ -145,6 +146,7 @@ gui.render = function ()
             gui.elements.maximum_glyph_level:render('Maximum level', 'Only upgrade glyphs with level less than or equal to this value')
             gui.elements.upgrade_legendary_toggle:render('Upgrade to legendary glyph', 'Disable this to save gem fragments')
         end
+        gui.elements.disable_orbwalker_at_glyphstone:render('Disable orbwalker at glyphstone', 'When enabled, suspends orbwalker skill casts while standing within 5 units of the glyphstone after the boss dies')
         gui.elements.use_chorons_soul:render("Use Choron's Soul",
             "After the boss dies, interact with the Choron's Soul actor to consume " ..
             "remaining glyph upgrade chances for experience.")

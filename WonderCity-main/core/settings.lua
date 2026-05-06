@@ -85,6 +85,7 @@ settings.update_settings = function ()
     settings.boss_delay = gui.elements.boss_delay:get()
     settings.loot_obols = gui.elements.loot_obols:get()
     settings.beacon_timeout = gui.elements.beacon_timeout:get()
+    settings.enticement_timeout = gui.elements.enticement_timeout:get()
     settings.max_enticement = gui.elements.max_enticement:get()
     settings.batmobile_priority = gui.batmobile_priority[gui.elements.batmobile_priority:get()+1]
     settings.tribute_priorities = {}

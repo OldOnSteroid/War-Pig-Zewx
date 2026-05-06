@@ -24,26 +24,8 @@ local MAX_DISABLE_DEFER_SECONDS = 120
 -- the enable gate. Timings are deliberate: the Tab open animation is fast
 -- but the click must land after the UI has settled, and the quest teleport
 -- channel runs ~3-5s (matches teleport_to_waypoint).
-local TELEPORT_TAB_DELAY    = 0.5
--- 1.5s after Tab before clicking. The Quests / Map panel fade-in can run
--- past 1s on slower frames and clicking before the target is rendered
--- silently no-ops (the click lands on whatever's underneath the cursor in
--- the world). Bumped from 1.0s to 1.5s based on user report of "Tab opens
--- but nothing clicks".
-local TELEPORT_CLICK_DELAY  = 1.5
 local TELEPORT_SETTLE_DELAY = 5.0
-local TELEPORT_VK_TAB       = 0x09
 
--- Plugins that MUST land outside of town for the activity to make sense.
--- After WAIT_SETTLE finishes we check `in_town_disable_when()`: if we're still
--- in town the click missed (UI not ready, wrong coords, etc.) → restart the
--- Tab+click sequence instead of enabling the plugin in town and watching it
--- crash or do nothing.  Capped at TELEPORT_RETRY_MAX so a misconfigured click
--- target can't infinite-loop.
-local TELEPORT_REQUIRE_LEAVE_TOWN = {
-    InfernalHordesPlugin = true,  -- Hordes script blows up if started in Temis
-}
-local TELEPORT_RETRY_MAX = 4
 -- Hold time AFTER the incoming activity first appears in the matched set.
 -- Stops us from pressing Tab the same tick the previous WarPlan unmatched —
 -- the next WarPlan (e.g. TurnIn) typically lands ~1 second later, and the
@@ -51,17 +33,6 @@ local TELEPORT_RETRY_MAX = 4
 -- pixel-targeted click can hit it. 2.5s comfortably covers the 1-1.5s
 -- spawn delay seen in logs (Helltide → TurnIn ≈ 1.0s) plus UI render.
 local TELEPORT_INCOMING_SETTLE = 2.5
-
--- Predicates that gate the START of the teleport sequence. teleport_pending
--- can be armed long before any of these pass; we hold the sequence until
--- they're all true so we don't Tab/click while the player is still mid-
--- loot-or-salvage cleanup OR before the next quest's panel entry exists.
---
--- We deliberately do NOT gate on in_town_attribute: HelltideRevamped doesn't
--- auto-teleport to town when its quest unmatches, so requiring "in town"
--- would deadlock the helltide → turn-in handoff. The user's spec is "click
--- teleports to the quest from anywhere" — the click itself does the
--- traveling — so being in town isn't a precondition.
 
 local function alfred_idle()
     local alfred = _G.AlfredTheButlerPlugin
@@ -86,16 +57,8 @@ local function alfred_idle()
 end
 
 local teleport_transition = {
-    state      = 'IDLE',  -- IDLE | WAIT_TAB | WAIT_CLICK | WAIT_SETTLE
+    state      = 'IDLE',  -- IDLE | TELEPORTING
     started_at = -math.huge,
-    -- Captured when the sequence starts (entering WAIT_TAB) so the post-settle
-    -- verification step knows which plugin we're trying to teleport into.
-    -- nil while IDLE.
-    incoming_plugin = nil,
-    -- Counts WAIT_TAB → WAIT_SETTLE → (still in town) → WAIT_TAB cycles for
-    -- the current activity.  Reset whenever the sequence finishes successfully
-    -- or we abort.  Compared against TELEPORT_RETRY_MAX.
-    retry_count = 0,
 }
 -- True when the teleport sequence still needs to start. Two trigger sources:
 --   * plugin_disable() — fires AFTER the previous activity's disable_when
@@ -110,40 +73,16 @@ local teleport_transition = {
 -- still has chests to open and loot to salvage. Triggering on the new
 -- pattern's match would interrupt that cleanup and lose the loot.
 local teleport_pending = false
--- Tracks when the *incoming* activity (next plugin or task) first matched
--- after teleport_pending was armed. We need to wait TELEPORT_INCOMING_SETTLE
--- past this point before pressing Tab so the in-game quest panel renders the
--- new entry before we click. Cleared when a sequence starts or aborts.
+-- Tracks when the *incoming* activity first matched after teleport_pending was
+-- armed. We wait TELEPORT_INCOMING_SETTLE before calling teleport_to_activity()
+-- so the warplan data reflects the new quest. Cleared when a sequence starts.
 local teleport_incoming_first_seen = nil
--- Suppresses repeat "teleport holding — …" logs while the sequence is
--- waiting for its predicates. Cleared the moment we transition out of IDLE.
+-- Suppresses repeat "teleport holding — …" logs while waiting for predicates.
 local teleport_holding_logged = false
 -- Tracks whether ANY plugin/task has been active under this WarPigs session.
 -- False until the first activity starts; switched true on first activation
 -- so cold-start fires exactly once. Reset by release_all().
 local had_active_session = false
-
--- Recent click marker log for the on-screen "where did the bot just click?"
--- overlay. Same shape WonderCity uses: each entry fades over CLICK_FADE
--- seconds. Cap to 8 entries to bound memory in long sessions.
-local CLICK_FADE   = 6.0
-local recent_clicks = {}
-
-local function record_click(label, sx, sy, kind)
-    recent_clicks[#recent_clicks + 1] = {
-        label = label, x = sx, y = sy, kind = kind or 'left',
-        t = get_time_since_inject(),
-    }
-    while #recent_clicks > 8 do table.remove(recent_clicks, 1) end
-end
-
-function orchestrator.get_recent_clicks()
-    local now = get_time_since_inject()
-    while recent_clicks[1] and (now - recent_clicks[1].t) > CLICK_FADE do
-        table.remove(recent_clicks, 1)
-    end
-    return recent_clicks, CLICK_FADE
-end
 
 -- Predicate: is the player in a town level area? Reused by Pit / WonderCity /
 -- Helltide entries since "back in town" is the natural settle point for all
@@ -509,12 +448,8 @@ local function plugin_disable(entry)
     last_enabled_reason[entry.plugin] = nil
     last_disable_time[entry.plugin] = get_time_since_inject()
     -- Arm the teleport sequence for the NEXT activity. plugin_disable only
-    -- fires after disable_when has satisfied, so by here:
-    --   * Reaper has waited kill+60s (chest open + loot pickup time)
-    --   * Pit/WC have landed in town (Alfred salvage already complete)
-    -- That means we're in a clean state and free to Tab → click → teleport
-    -- without losing loot. Sequence actually starts inside orchestrator.tick
-    -- once a new wanted plugin or matched task entry exists.
+    -- fires after disable_when has satisfied (Reaper: kill+60s, Pit/WC: in
+    -- town after Alfred salvage), so we're in a clean state to teleport.
     if settings.use_teleport_transition then
         teleport_pending = true
     end
@@ -604,13 +539,11 @@ function orchestrator.tick()
         if teleport_transition.state ~= 'IDLE' then
             log('died mid-transition (state=' .. teleport_transition.state ..
                 ') — re-arming teleport sequence for after respawn')
-            teleport_transition.state           = 'IDLE'
-            teleport_transition.started_at      = -math.huge
-            teleport_transition.incoming_plugin = nil
-            teleport_transition.retry_count     = 0
-            teleport_pending                    = true
-            teleport_incoming_first_seen        = nil
-            teleport_holding_logged             = false
+            teleport_transition.state      = 'IDLE'
+            teleport_transition.started_at = -math.huge
+            teleport_pending               = true
+            teleport_incoming_first_seen   = nil
+            teleport_holding_logged        = false
         elseif settings.use_teleport_transition and not teleport_pending then
             -- Death outside an active transition still likely cancelled any
             -- in-progress in-game teleport channel (common when a mob hits
@@ -881,22 +814,15 @@ function orchestrator.tick()
     end
 
     -- ── TELEPORT TRANSITION (optional) ──────────────────────────────────────
-    -- A new activity (plugin or task) just transitioned from unmatched →
-    -- matched (see "TELEPORT TRIGGER" block above). Run the Tab+Click
-    -- sequence and gate the enable + task tick until it settles. Stages are
-    -- time-driven so we don't need to poll game state for "map open" /
-    -- "teleport landing".
+    -- After an activity ends, call warplan.teleport_to_activity() and wait
+    -- for the channel to settle before enabling the next plugin. We hold the
+    -- call until the incoming quest has been visible for TELEPORT_INCOMING_SETTLE
+    -- so warplan data reflects the new activity, and until Alfred finishes any
+    -- loot/salvage work.
     if settings.use_teleport_transition
         and teleport_pending
         and teleport_transition.state == 'IDLE'
     then
-        -- Resolve "incoming activity": a wanted plugin OR a matched task
-        -- entry. We'll only press Tab after one exists AND has been visible
-        -- to the orchestrator for TELEPORT_INCOMING_SETTLE — that gives the
-        -- in-game quest panel time to render the new entry before our
-        -- pixel-targeted click fires. Without this, Helltide → TurnIn
-        -- pressed Tab BEFORE the TurnIn quest had even appeared, so the
-        -- click landed on stale (empty) UI and we stayed in helltide.
         local has_incoming = next(wants) ~= nil
         if not has_incoming then
             for pattern, raw_entry in pairs(orchestrator.quest_plugin_map) do
@@ -919,8 +845,6 @@ function orchestrator.tick()
 
         local ready = has_incoming and incoming_settled and alfred_done
         if not ready then
-            -- Log once with the current blocker(s) so the user can see WHY
-            -- the sequence is held. Re-emit only when the reason changes.
             local reason
             if not has_incoming then
                 reason = 'no incoming activity yet'
@@ -938,92 +862,21 @@ function orchestrator.tick()
             teleport_pending             = false
             teleport_incoming_first_seen = nil
             teleport_holding_logged      = false
-            teleport_transition.state      = 'WAIT_TAB'
+            teleport_transition.state    = 'TELEPORTING'
             teleport_transition.started_at = now
-            -- Capture the incoming plugin (if any) so the post-settle verifier
-            -- knows whether to enforce "must have left town".  Preemption has
-            -- already pruned `wants` to at most the highest-priority plugin.
-            local incoming
-            for plugin_name in pairs(wants) do incoming = plugin_name; break end
-            teleport_transition.incoming_plugin = incoming
-            teleport_transition.retry_count     = 0
-            log(string.format(
-                'teleport transition started — Tab in %.1fs, click target=(%d, %d), settle=%.1fs%s',
-                TELEPORT_TAB_DELAY,
-                settings.teleport_click_x or 0,
-                settings.teleport_click_y or 0,
-                TELEPORT_SETTLE_DELAY,
-                incoming and (' (incoming=' .. incoming .. ')') or ''))
+            if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
+                warplan.teleport_to_activity()
+                log(string.format(
+                    'warplan.teleport_to_activity() called — settle=%.1fs', TELEPORT_SETTLE_DELAY))
+            else
+                log('warplan.teleport_to_activity not available — skipping teleport')
+            end
         end
     end
-    if teleport_transition.state == 'WAIT_TAB' then
-        if (now - teleport_transition.started_at) >= TELEPORT_TAB_DELAY then
-            if utility and type(utility.send_key_press) == 'function' then
-                utility.send_key_press(TELEPORT_VK_TAB)
-                log('teleport transition: Tab pressed')
-            else
-                log('teleport transition: utility.send_key_press unavailable — skipping Tab')
-            end
-            teleport_transition.state      = 'WAIT_CLICK'
-            teleport_transition.started_at = now
-        end
-    elseif teleport_transition.state == 'WAIT_CLICK' then
-        if (now - teleport_transition.started_at) >= TELEPORT_CLICK_DELAY then
-            local x = settings.teleport_click_x or 0
-            local y = settings.teleport_click_y or 0
-            local have_util = utility and type(utility.send_mouse_click) == 'function'
-            if x > 0 and y > 0 and have_util then
-                -- Move cursor onto the target before clicking. Some panels
-                -- ignore a click whose preceding mouse-position event landed
-                -- elsewhere; an explicit move forces the cursor to register
-                -- at (x, y) before the button event.
-                if type(utility.send_mouse_move) == 'function' then
-                    utility.send_mouse_move(x, y)
-                end
-                utility.send_mouse_click(x, y)
-                record_click('Teleport', x, y, 'left')
-                log(string.format('teleport transition: CLICKED (%d, %d)', x, y))
-            elseif not have_util then
-                log('teleport transition: SKIP click — utility.send_mouse_click missing')
-            else
-                log(string.format(
-                    'teleport transition: SKIP click — coords (%d,%d) are zero. ' ..
-                    'Set them via the GUI sliders or hover the in-game target ' ..
-                    'and press the Capture cursor key (default F5).',
-                    x, y))
-            end
-            teleport_transition.state      = 'WAIT_SETTLE'
-            teleport_transition.started_at = now
-        end
-    elseif teleport_transition.state == 'WAIT_SETTLE' then
+    if teleport_transition.state == 'TELEPORTING' then
         if (now - teleport_transition.started_at) >= TELEPORT_SETTLE_DELAY then
-            -- Post-settle verification: for plugins that must NOT start in town
-            -- (e.g. Hordes), confirm we actually left town.  If still in town,
-            -- the click missed — retry the Tab+click sequence instead of
-            -- enabling the plugin in town.  Retry counter caps the loop so a
-            -- bad click target can't grind forever.
-            local incoming      = teleport_transition.incoming_plugin
-            local require_leave = incoming and TELEPORT_REQUIRE_LEAVE_TOWN[incoming]
-            local still_in_town = require_leave and in_town_disable_when()
-            if still_in_town and teleport_transition.retry_count < TELEPORT_RETRY_MAX then
-                teleport_transition.retry_count = teleport_transition.retry_count + 1
-                teleport_transition.state       = 'WAIT_TAB'
-                teleport_transition.started_at  = now
-                log(string.format(
-                    'teleport transition: settled but still in town — click missed, retrying Tab+click (attempt %d/%d) for %s',
-                    teleport_transition.retry_count, TELEPORT_RETRY_MAX, tostring(incoming)))
-            else
-                if still_in_town then
-                    log(string.format(
-                        'teleport transition: still in town after %d retries — giving up and releasing enable gate (%s will likely fail)',
-                        teleport_transition.retry_count, tostring(incoming)))
-                else
-                    log('teleport transition: settled — releasing enable gate')
-                end
-                teleport_transition.state           = 'IDLE'
-                teleport_transition.incoming_plugin = nil
-                teleport_transition.retry_count     = 0
-            end
+            teleport_transition.state = 'IDLE'
+            log('teleport settled — releasing enable gate')
         end
     end
 
@@ -1119,13 +972,11 @@ function orchestrator.release_all()
     last_disable_time     = {}
     enable_blocked        = {}
     last_enabled_reason   = {}
-    teleport_pending      = false
+    teleport_pending             = false
     teleport_incoming_first_seen = nil
-    teleport_holding_logged = false
-    teleport_transition.state           = 'IDLE'
-    teleport_transition.started_at      = -math.huge
-    teleport_transition.incoming_plugin = nil
-    teleport_transition.retry_count     = 0
+    teleport_holding_logged      = false
+    teleport_transition.state    = 'IDLE'
+    teleport_transition.started_at = -math.huge
     had_active_session       = false
     -- Filler-pit state — re-arm only after the next session sees a turn-in.
     turn_in_was_matched      = false
