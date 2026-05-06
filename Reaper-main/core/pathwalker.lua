@@ -148,7 +148,9 @@ end
 -- Public API
 -- -------------------------------------------------------
 
-function M.start_walking_path_with_points(points, path_name, _force)
+-- start_index lets callers resume mid-path (e.g. fallback from a failed
+-- long-path run where the player is already partway to the destination).
+function M.start_walking_path_with_points(points, path_name, _force, start_index)
     if not points or #points == 0 then
         console.print("[Pathwalker] No points provided.")
         return false
@@ -159,7 +161,7 @@ function M.start_walking_path_with_points(points, path_name, _force)
 
     M.current_path           = normalised
     M.original_path          = normalised
-    M.current_waypoint_index = 1
+    M.current_waypoint_index = math.max(1, math.min(start_index or 1, #normalised))
     M.is_walking             = true
     M.walking_to_start       = false
     last_pos                 = nil
@@ -168,8 +170,8 @@ function M.start_walking_path_with_points(points, path_name, _force)
     interacting              = false
     interact_start           = 0
 
-    console.print(string.format("[Pathwalker] Started: %s (%d pts, jitter=%.1fm)",
-        path_name or "path", #M.current_path, JITTER_MAX))
+    console.print(string.format("[Pathwalker] Started: %s (%d pts, start=%d, jitter=%.1fm)",
+        path_name or "path", #M.current_path, M.current_waypoint_index, JITTER_MAX))
     return true
 end
 

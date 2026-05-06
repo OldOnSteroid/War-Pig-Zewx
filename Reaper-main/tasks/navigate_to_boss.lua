@@ -167,6 +167,11 @@ local nav = {
     long_path_retries     = 0,      -- consecutive failed navigate_long_path attempts
     long_path_wait_frames = 0,      -- frame cap safety net while exploring between retries
     long_path_explore_start = nil,  -- player position when exploration began (for distance check)
+    -- Counts LONG_PATHING → PATHWALKING cycles where the long path ended before
+    -- reaching the goal and no altar was found. When this hits MAX_LONG_PATH_RETRIES
+    -- we fall back to path-file walking from the nearest waypoint, because it means
+    -- the A* target is wall-blocked (e.g. Harbinger path endpoint behind geometry).
+    long_path_short_cycles = 0,
     -- traversal fields
     trav_target_pos     = nil,    -- vec3 position of the traversal gizmo
     trav_start_pos      = nil,    -- player position when we started approaching traversal
@@ -190,6 +195,7 @@ local function reset_nav()
     nav.long_path_retries       = 0
     nav.long_path_wait_frames   = 0
     nav.long_path_explore_start = nil
+    nav.long_path_short_cycles  = 0
     nav.trav_target_pos    = nil
     nav.trav_start_pos     = nil
     nav.trav_got_close     = false
@@ -200,6 +206,25 @@ local function reset_nav()
         BatmobilePlugin.stop_long_path(plugin_label)
         BatmobilePlugin.clear_target(plugin_label)
     end
+end
+
+-- Returns the index of the path point closest to player_pos (XY only).
+-- Used when starting a path-file fallback from the middle of the route.
+local function find_nearest_path_index(pts, player_pos)
+    local best_i, best_d = 1, math.huge
+    for i, raw in ipairs(pts) do
+        local pos
+        if type(raw) == "userdata" then
+            pos = raw
+        elseif type(raw) == "table" then
+            pos = vec3:new(raw[1] or raw.x or 0, raw[2] or raw.y or 0, raw[3] or raw.z or 0)
+        end
+        if pos then
+            local d = player_pos:dist_to_ignore_z(pos)
+            if d < best_d then best_i = i; best_d = d end
+        end
+    end
+    return best_i
 end
 
 -- Returns the best-known walkable position near the altar for this boss.
@@ -468,6 +493,49 @@ function task.Execute()
                 return
             end
 
+            -- Path-file fallback: if pathwalker is already walking (started by the
+            -- short-cycle recovery below), keep driving it until done, then resume
+            -- normal long-path navigation from the new position.
+            if pathwalker.is_walking then
+                if pathwalker.is_path_completed() then
+                    console.print("[Reaper] Path-file fallback complete — resuming long-path navigation.")
+                    pathwalker.stop_walking()
+                    nav.long_path_short_cycles = 0
+                    -- Fall through to attempt navigate_long_path from the new position.
+                else
+                    pathwalker.update_path_walking()
+                    return
+                end
+            end
+
+            -- Short-cycle recovery: if navigate_long_path has repeatedly started OK
+            -- but ended before reaching the goal (wall-blocked A* target, e.g.
+            -- Harbinger path endpoint behind geometry), fall back to path-file walking
+            -- from the nearest recorded waypoint so the player actually gets there.
+            if nav.long_path_short_cycles >= MAX_LONG_PATH_RETRIES then
+                console.print(string.format(
+                    "[Reaper] %d consecutive short long-path cycles — falling back to path-file walking.",
+                    nav.long_path_short_cycles))
+                nav.long_path_short_cycles = 0
+                local variants = load_variants(boss.id)
+                local path     = pick_best_path(variants)
+                if path and #path > 0 then
+                    local pp        = get_player_position()
+                    local start_idx = pp and find_nearest_path_index(path, pp) or 1
+                    -- Cap at 85% to ensure we walk the final approach, not skip it.
+                    start_idx = math.min(start_idx, math.max(1, math.floor(#path * 0.85)))
+                    BatmobilePlugin.stop_long_path(plugin_label)
+                    BatmobilePlugin.clear_target(plugin_label)
+                    pathwalker.start_walking_path_with_points(path, boss.id .. "_fallback", nil, start_idx)
+                    console.print(string.format(
+                        "[Reaper] Path-file fallback: %s  start=%d/%d",
+                        boss.id, start_idx, #path))
+                    pathwalker.update_path_walking()
+                    return
+                end
+                console.print("[Reaper] No path file for " .. boss.id .. " — continuing long-path retries.")
+            end
+
             -- Determine target: visible altar first, then path-file endpoint or seed
             local target, target_label
             if altar then
@@ -678,7 +746,13 @@ function task.Execute()
                     set_state(STATE.PATHWALKING)
                 end
             else
-                console.print("[Reaper] Long path ended, no altar — returning to PATHWALKING.")
+                -- Count cycles where long path ended without reaching the goal.
+                -- After MAX_LONG_PATH_RETRIES such cycles the PATHWALKING branch
+                -- switches to path-file walking to bypass the wall-blocked A* target.
+                nav.long_path_short_cycles = nav.long_path_short_cycles + 1
+                console.print(string.format(
+                    "[Reaper] Long path ended, no altar — returning to PATHWALKING. (short_cycles=%d)",
+                    nav.long_path_short_cycles))
                 set_state(STATE.PATHWALKING)
             end
             return

@@ -86,6 +86,19 @@ local teleport_holding_logged = false
 -- so cold-start fires exactly once. Reset by release_all().
 local had_active_session = false
 
+-- Scans all actors for a given skin name. Used by arrived_when predicates so
+-- the orchestrator can confirm "we are at the quest destination" without
+-- importing plugin-specific utils modules.
+local function actor_present(skin_name)
+    local ok, actors = pcall(function() return actors_manager:get_all_actors() end)
+    if not ok or type(actors) ~= 'table' then return false end
+    for _, actor in ipairs(actors) do
+        local ok2, name = pcall(function() return actor:get_skin_name() end)
+        if ok2 and name == skin_name then return true end
+    end
+    return false
+end
+
 -- Predicate: is the player in a town level area? Reused by Pit / WonderCity /
 -- Helltide entries since "back in town" is the natural settle point for all
 -- three. Returns true on any failure to read the attribute (don't block on
@@ -203,6 +216,13 @@ orchestrator.quest_plugin_map = {
         -- phase). Wait for the player to fully return to town before letting
         -- the next plugin take over.
         disable_when = in_town_disable_when,
+        -- Pit tower lives in Temis. If we're already in Temis when the teleport
+        -- sequence fires, world/zone won't change and the confirmation loop
+        -- would retry forever. arrived_when lets the orchestrator skip or
+        -- confirm the teleport when the pit tower actor is already visible.
+        arrived_when = function()
+            return actor_present('TWN_Kehj_IronWolves_PitKey_Crafter')
+        end,
     },
 
     -- Helltide handoff: no disable_when. The quest disappearing means the
@@ -215,6 +235,11 @@ orchestrator.quest_plugin_map = {
     WarPlans_QST_Undercity = {
         plugin       = 'WonderCityPlugin',
         disable_when = in_town_disable_when,  -- wait for the Kurast/Temis return
+        -- Brazier lives in the Undercity town zone. Same loop-prevention as
+        -- the Pit entry above — if already in town the teleport is a no-op.
+        arrived_when = function()
+            return actor_present('Aubrie_Test_Undercity_Crafter')
+        end,
     },
 
     -- Confirmed seen in logs as WarPlans_QST_InfernalHordes_BSK; substring
@@ -877,20 +902,36 @@ function orchestrator.tick()
             teleport_pending             = false
             teleport_incoming_first_seen = nil
             teleport_holding_logged      = false
-            teleport_transition.state    = 'TELEPORTING'
-            teleport_transition.started_at = now
-            if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
-                local snap_w = get_current_world()
-                teleport_transition.snap_world = snap_w and snap_w:get_name()
-                teleport_transition.snap_zone  = snap_w and snap_w:get_current_zone_name()
-                warplan.teleport_to_activity()
-                log(string.format(
-                    'warplan.teleport_to_activity() called — world=%s zone=%s check_in=%.1fs',
-                    tostring(teleport_transition.snap_world),
-                    tostring(teleport_transition.snap_zone),
-                    TELEPORT_CHECK_INTERVAL))
+            -- If the incoming plugin's quest actor is already visible we are
+            -- already at the destination (e.g. in Temis for Pit/Undercity).
+            -- Calling warplan.teleport_to_activity() would be a no-op and the
+            -- world/zone snapshot would never change, causing an infinite retry.
+            local already_arrived = false
+            for _, entry in pairs(wants) do
+                if type(entry.arrived_when) == 'function' and entry.arrived_when() then
+                    already_arrived = true
+                    break
+                end
+            end
+            if already_arrived then
+                log('teleport skipped — quest actor present, already at destination')
+                -- State stays IDLE; enable gate clears on the next tick.
             else
-                log('warplan.teleport_to_activity not available — skipping teleport')
+                teleport_transition.state    = 'TELEPORTING'
+                teleport_transition.started_at = now
+                if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
+                    local snap_w = get_current_world()
+                    teleport_transition.snap_world = snap_w and snap_w:get_name()
+                    teleport_transition.snap_zone  = snap_w and snap_w:get_current_zone_name()
+                    warplan.teleport_to_activity()
+                    log(string.format(
+                        'warplan.teleport_to_activity() called — world=%s zone=%s check_in=%.1fs',
+                        tostring(teleport_transition.snap_world),
+                        tostring(teleport_transition.snap_zone),
+                        TELEPORT_CHECK_INTERVAL))
+                else
+                    log('warplan.teleport_to_activity not available — skipping teleport')
+                end
             end
         end
     end
@@ -901,11 +942,25 @@ function orchestrator.tick()
             local cur_zone  = w and w:get_current_zone_name()
             local changed   = cur_world ~= teleport_transition.snap_world
                            or cur_zone  ~= teleport_transition.snap_zone
-            if changed then
+            -- Secondary confirmation: quest actor visible means we arrived even
+            -- if world/zone didn't change (warplan teleported us to the same
+            -- zone the actor lives in, e.g. Pit/Undercity → Temis while already
+            -- in Temis on a retry path).
+            local arrived_now = false
+            if not changed then
+                for _, entry in pairs(wants) do
+                    if type(entry.arrived_when) == 'function' and entry.arrived_when() then
+                        arrived_now = true
+                        break
+                    end
+                end
+            end
+            if changed or arrived_now then
                 teleport_transition.state    = 'IDLE'
                 teleport_transition.snap_world = nil
                 teleport_transition.snap_zone  = nil
-                log(string.format('teleport confirmed (world=%s zone=%s) — releasing enable gate',
+                log(string.format('teleport confirmed (%s world=%s zone=%s) — releasing enable gate',
+                    arrived_now and 'arrived_when' or 'world/zone',
                     tostring(cur_world), tostring(cur_zone)))
             else
                 teleport_transition.started_at = now
