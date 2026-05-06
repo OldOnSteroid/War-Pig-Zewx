@@ -20,11 +20,11 @@ local MAX_DISABLE_DEFER_SECONDS = 120
 -- settings.use_teleport_transition is on. After a plugin is disabled and a
 -- new plugin is wanted, we send Tab once (open map / quest list), wait
 -- briefly, click the user-defined pixel target (initiate teleport to the
--- next quest), and then wait for the channel + arrival before releasing
--- the enable gate. Timings are deliberate: the Tab open animation is fast
--- but the click must land after the UI has settled, and the quest teleport
--- channel runs ~3-5s (matches teleport_to_waypoint).
-local TELEPORT_SETTLE_DELAY = 5.0
+-- next quest), and then confirm arrival before releasing the enable gate.
+-- Confirmation: after TELEPORT_CHECK_INTERVAL seconds we snapshot world +
+-- zone at fire time and re-check; if at least one changed the teleport
+-- landed, otherwise we retry warplan.teleport_to_activity() and check again.
+local TELEPORT_CHECK_INTERVAL = 3.0
 
 -- Hold time AFTER the incoming activity first appears in the matched set.
 -- Stops us from pressing Tab the same tick the previous WarPlan unmatched —
@@ -59,6 +59,8 @@ end
 local teleport_transition = {
     state      = 'IDLE',  -- IDLE | TELEPORTING
     started_at = -math.huge,
+    snap_world = nil,  -- world name at the moment teleport was sent
+    snap_zone  = nil,  -- zone name at the moment teleport was sent
 }
 -- True when the teleport sequence still needs to start. Two trigger sources:
 --   * plugin_disable() — fires AFTER the previous activity's disable_when
@@ -878,18 +880,47 @@ function orchestrator.tick()
             teleport_transition.state    = 'TELEPORTING'
             teleport_transition.started_at = now
             if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
+                local snap_w = get_current_world()
+                teleport_transition.snap_world = snap_w and snap_w:get_name()
+                teleport_transition.snap_zone  = snap_w and snap_w:get_current_zone_name()
                 warplan.teleport_to_activity()
                 log(string.format(
-                    'warplan.teleport_to_activity() called — settle=%.1fs', TELEPORT_SETTLE_DELAY))
+                    'warplan.teleport_to_activity() called — world=%s zone=%s check_in=%.1fs',
+                    tostring(teleport_transition.snap_world),
+                    tostring(teleport_transition.snap_zone),
+                    TELEPORT_CHECK_INTERVAL))
             else
                 log('warplan.teleport_to_activity not available — skipping teleport')
             end
         end
     end
     if teleport_transition.state == 'TELEPORTING' then
-        if (now - teleport_transition.started_at) >= TELEPORT_SETTLE_DELAY then
-            teleport_transition.state = 'IDLE'
-            log('teleport settled — releasing enable gate')
+        if (now - teleport_transition.started_at) >= TELEPORT_CHECK_INTERVAL then
+            local w         = get_current_world()
+            local cur_world = w and w:get_name()
+            local cur_zone  = w and w:get_current_zone_name()
+            local changed   = cur_world ~= teleport_transition.snap_world
+                           or cur_zone  ~= teleport_transition.snap_zone
+            if changed then
+                teleport_transition.state    = 'IDLE'
+                teleport_transition.snap_world = nil
+                teleport_transition.snap_zone  = nil
+                log(string.format('teleport confirmed (world=%s zone=%s) — releasing enable gate',
+                    tostring(cur_world), tostring(cur_zone)))
+            else
+                teleport_transition.started_at = now
+                if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
+                    warplan.teleport_to_activity()
+                    log(string.format(
+                        'teleport retry — world/zone unchanged (world=%s zone=%s), retrying in %.1fs',
+                        tostring(cur_world), tostring(cur_zone), TELEPORT_CHECK_INTERVAL))
+                else
+                    teleport_transition.state    = 'IDLE'
+                    teleport_transition.snap_world = nil
+                    teleport_transition.snap_zone  = nil
+                    log('teleport: warplan not available on retry — releasing gate')
+                end
+            end
         end
     end
 
@@ -988,8 +1019,10 @@ function orchestrator.release_all()
     teleport_pending             = false
     teleport_incoming_first_seen = nil
     teleport_holding_logged      = false
-    teleport_transition.state    = 'IDLE'
+    teleport_transition.state      = 'IDLE'
     teleport_transition.started_at = -math.huge
+    teleport_transition.snap_world = nil
+    teleport_transition.snap_zone  = nil
     had_active_session       = false
     -- Filler-pit state — re-arm only after the next session sees a turn-in.
     turn_in_was_matched      = false

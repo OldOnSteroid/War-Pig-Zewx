@@ -47,7 +47,6 @@ local task = { name = "Kill Monsters" }
 
 function task.reset()
     orbwalker.set_clear_toggle(false)
-    orbwalker.set_block_movement(false)
 end
 
 function task.shouldExecute()
