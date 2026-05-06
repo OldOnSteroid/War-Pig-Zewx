@@ -157,6 +157,6 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 
 Each sub-plugin lists its own author/contributors in its folder's `README.md`. This suite is a curated bundle, not a single-author project — credit goes to the original plugin authors:
 
-- Zewx · Pinguu · NotNeer · Letrico · SupraDad13 · Lanvi · RadicalDadical55 · Diobyte · TesXter · and the HordeDev community thread
+- Zewx · Pinguu · NotNeer · Letrico · SupraDad13 · Lanvi · RadicalDadical55 · Diobyte · TesXter · Moogazoog • and the HordeDev community thread
 
 Bundled and orchestrated by **Zewx**.
