@@ -1347,7 +1347,11 @@ navigator.move = function ()
         end
         local dist_to_target = utils.distance(navigator.last_pos, navigator.target)
         console.print('[nav] pathfinding to=' .. utils.vec_to_string(navigator.target) .. ' dist=' .. string.format('%.1f', dist_to_target) .. ' custom=' .. tostring(navigator.is_custom_target))
-        local explore_time_cap = (settings.require_full_path_explore and not navigator.is_custom_target)
+        -- Always cap explorer targets to explore_path_budget_ms (was gated behind
+        -- require_full_path_explore, making the GUI setting a no-op in normal use).
+        -- Custom targets keep the default tiered caps so kill_monster / patrol
+        -- targets still get a full budget for long approach paths.
+        local explore_time_cap = (not navigator.is_custom_target)
             and (settings.explore_path_budget_ms / 1000.0) or nil
         local result, is_partial = path_finder.find_path(navigator.last_pos, navigator.target, navigator.is_custom_target, nil, explore_time_cap)
 

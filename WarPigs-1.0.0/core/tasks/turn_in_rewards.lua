@@ -7,7 +7,8 @@ local M = {}
 
 local TEMIS_WP   = 0x1CE51E       -- Skov_Temis waypoint sno (from existing plugins)
 local TEMIS_ZONE = 'Skov_Temis'
-local NPC_NAME   = 'NPC_QST_X2_Tyrael_NonCombat'
+local NPC_NAME    = 'NPC_QST_X2_Tyrael_NonCombat'
+local VENDOR_NAME = 'Warplans_Vendor'  -- reroll war plan vendor
 
 local INTERACT_DIST     = 3.0
 local INTERACT_COOLDOWN = 1.5

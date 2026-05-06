@@ -43,8 +43,9 @@ local state         = S.IDLE
 local state_entered = -math.huge
 local last_interact = -math.huge
 local last_diag     = -math.huge
-local reroll_count  = 0
-local recent_clicks = {}
+local reroll_count   = 0
+local reroll_pending = false  -- true when we need to open the panel then fire reroll clicks
+local recent_clicks  = {}
 
 -- ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -129,15 +130,20 @@ end
 -- Leaves the warplan in fully-selected state on success.
 -- Returns true if a valid path was found, false otherwise.
 local function dfs(required)
-    if warplan.selected_count() == required then
+    local depth = warplan.selected_count()
+    if depth == required then
         return warplan.is_complete()
     end
     local legal = warplan.get_selectable_now()
-    local count_before = warplan.selected_count()
+    vlog(string.format('dfs depth=%d/%d, choices=%d', depth, required, #legal))
+    local count_before = depth
     for _, id in ipairs(legal) do
         local ok_n, name = pcall(function() return warplan.node_name(id) end)
         local activity   = (ok_n and type(name) == 'string') and name or ''
-        if not BLOCKED[activity] then
+        if BLOCKED[activity] then
+            vlog(string.format('  skip blocked: %d:%s', id, activity))
+        else
+            vlog(string.format('  try: %d:%s', id, activity))
             local ok_s, accepted = pcall(function() return warplan.select_node(id) end)
             if ok_s and accepted then
                 if dfs(required) then return true end
@@ -148,6 +154,9 @@ local function dfs(required)
                     log('dfs: deselect_last inconsistency — aborting search')
                     return false
                 end
+                vlog(string.format('  backtrack: %d:%s', id, activity))
+            else
+                vlog(string.format('  select_node rejected: %d:%s', id, activity))
             end
         end
     end
@@ -203,7 +212,8 @@ function planner.tick()
             if state ~= S.CONFIRMING and state ~= S.DONE_WAIT then
                 clear_warplan_path()
             end
-            reroll_count = 0
+            reroll_count   = 0
+            reroll_pending = false
             set_state(S.IDLE)
             return
         end
@@ -214,9 +224,10 @@ function planner.tick()
         if not in_temis() or has_warplan_quests() then return end
 
         if warplan_api_ready() then
-            -- Panel data is already available; skip table approach
+            log('warplan panel already open — skipping vendor approach, going to FIND_PATH')
             set_state(S.FIND_PATH)
         elseif settings.table_actor_name ~= '' then
+            log('warplan panel not open — approaching vendor "' .. settings.table_actor_name .. '"')
             set_state(S.APPROACH_TABLE)
         else
             -- No actor name configured and panel not ready: can't do anything
@@ -264,18 +275,23 @@ function planner.tick()
             return
         end
         if (now() - last_interact) >= INTERACT_COOLDOWN then
-            loot_manager.interact_with_object(actor)
+            interact_vendor(actor)
             last_interact = now()
-            log('interacted with war plan table — waiting for panel')
+            log('interact_vendor: war plan table — waiting for panel')
+            set_state(S.WAIT_READY)
         end
-        set_state(S.WAIT_READY)
         return
     end
 
     -- ── WAIT_READY ────────────────────────────────────────────────────────────
     if state == S.WAIT_READY then
         if warplan_api_ready() then
-            set_state(S.FIND_PATH)
+            if reroll_pending then
+                log('panel open — firing reroll clicks')
+                set_state(S.REROLL_CLICK1)
+            else
+                set_state(S.FIND_PATH)
+            end
             return
         end
         if (now() - state_entered) >= WAIT_READY_TIMEOUT then
@@ -303,7 +319,22 @@ function planner.tick()
             return
         end
 
-        vlog(string.format('searching: required=%d', required))
+        log(string.format('searching: required=%d', required))
+
+        -- Dump every top-level node name so we can see what the tree contains.
+        local ok_sel, top_nodes = pcall(function() return warplan.get_selectable_now() end)
+        if ok_sel and type(top_nodes) == 'table' then
+            local parts = {}
+            for _, id in ipairs(top_nodes) do
+                local ok_n, nm = pcall(function() return warplan.node_name(id) end)
+                local activity = (ok_n and type(nm) == 'string' and nm ~= '') and nm or '?'
+                local tag = BLOCKED[activity] and ' [BLOCKED]' or ''
+                parts[#parts + 1] = string.format('%d:%s%s', id, activity, tag)
+            end
+            log('top-level nodes (' .. #parts .. '): ' .. (#parts > 0 and table.concat(parts, ', ') or 'none'))
+        else
+            log('get_selectable_now() failed: ' .. tostring(top_nodes))
+        end
 
         if required == 0 then
             -- Nothing to pick; confirm immediately
@@ -322,6 +353,7 @@ function planner.tick()
         end
 
         if found then
+            reroll_pending = false
             -- Path is now fully selected in the warplan API; log it and confirm
             local ok_p, path = pcall(function() return warplan.selected_path() end)
             if ok_p and type(path) == 'table' then
@@ -339,10 +371,13 @@ function planner.tick()
                 reroll_count + 1, MAX_REROLLS))
             if reroll_count >= MAX_REROLLS then
                 log('max rerolls reached — stopping. Verify reroll click coordinates.')
-                reroll_count = 0
+                reroll_count   = 0
+                reroll_pending = false
                 set_state(S.IDLE)
             else
-                set_state(S.REROLL_CLICK1)
+                reroll_pending = true
+                log('approaching vendor to open panel for reroll')
+                set_state(S.APPROACH_TABLE)
             end
         end
         return
@@ -370,7 +405,8 @@ function planner.tick()
             return
         end
         log('war plan confirmed')
-        reroll_count = 0
+        reroll_count   = 0
+        reroll_pending = false
         set_state(S.DONE_WAIT)
         return
     end
@@ -418,12 +454,13 @@ function planner.tick()
     -- ── REROLL_WAIT2 ──────────────────────────────────────────────────────────
     if state == S.REROLL_WAIT2 then
         if (now() - state_entered) >= REROLL_SETTLE_DELAY then
-            -- Panel should still be open with a newly generated tree
+            reroll_pending = false
             if warplan_api_ready() then
                 set_state(S.FIND_PATH)
             else
-                -- Panel closed somehow; re-open it
-                set_state(S.WAIT_READY)
+                -- Panel closed after confirm; re-open via vendor interact
+                log('panel closed after reroll confirm — re-approaching vendor')
+                set_state(S.APPROACH_TABLE)
             end
         end
         return

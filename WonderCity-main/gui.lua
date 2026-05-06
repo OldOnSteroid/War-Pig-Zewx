@@ -136,6 +136,8 @@ gui.elements = {
     max_enticement = slider_int:new(0, 9, 5, get_hash(plugin_label .. '_' .. 'max_enticement')),
     enticement_timeout = slider_int:new(0, 10, 4, get_hash(plugin_label .. '_' .. 'enticement_timeout')),
     beacon_timeout = slider_int:new(0, 30, 10, get_hash(plugin_label .. '_' .. 'beacon_timeout')),
+    skip_monsters = create_checkbox(false, 'skip_monsters'),
+    use_custom_explorer = create_checkbox(false, 'use_custom_explorer'),
     batmobile_priority = combo_box:new(1, get_hash(plugin_label .. '_' .. 'batmobile_priority')),
 
     tribute_priority_tree = tree_node:new(1),
@@ -211,6 +213,8 @@ gui.render = function ()
         gui.elements.enticement_timeout:render('Enticement delay (s)', 'time in seconds to wait before leaving enticement')
         gui.elements.beacon_timeout:render('Beacon delay (s)', 'time in seconds to wait before leaving beacon')
         gui.elements.loot_obols:render('Loot Obols', 'Loot Obols')
+        gui.elements.skip_monsters:render('Skip monsters', 'Disable orbwalker until reaching an enticement, beacon, elite or boss')
+        gui.elements.use_custom_explorer:render('Use custom explorer', 'Use the WonderCity targeted explorer instead of Batmobile full-coverage (objective-first BFS)')
 
         if gui.elements.tribute_priority_tree:push('Tribute Priority') then
             render_menu_header('Set priority for each tribute (0 = skip, 1 = highest priority)')

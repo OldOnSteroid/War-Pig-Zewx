@@ -810,6 +810,19 @@ function orchestrator.tick()
             end
         else
             was_off[plugin_name] = nil  -- wanted again; reset suppress flag
+            -- pending_disable can get stuck when the same plugin's quest
+            -- re-matches before disable_when() satisfied (e.g. a new Horde
+            -- WarPlan appears while still in BSK so the old disable deferred).
+            -- Once disable_when() finally clears here (player exited BSK,
+            -- landed in Caldeum), force the handoff: plugin_disable arms
+            -- teleport_pending so warplan.teleport_to_activity() fires before
+            -- the plugin is re-enabled next cycle.
+            if pending_disable[plugin_name] and entry.disable_when and entry.disable_when() then
+                log(plugin_name .. ': pending disable resolved while re-wanted — forcing handoff, arming teleport')
+                pending_disable[plugin_name]       = nil
+                pending_disable_since[plugin_name] = nil
+                plugin_disable(entry)
+            end
         end
     end
 

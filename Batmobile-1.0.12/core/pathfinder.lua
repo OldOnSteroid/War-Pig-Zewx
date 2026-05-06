@@ -285,13 +285,15 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
     local time_cap = time_cap_override or default_time_cap
     -- When a per-call override is provided it acts as both the cap AND a
     -- guaranteed floor, so winding paths with a short straight-line distance
-    -- aren't starved by the `goal_dist * 0.024` scaling term.
+    -- aren't starved by the `goal_dist * 0.003` scaling term.
     -- (get_closeby_node passes 0.040 as a hard upper bound; making it the
     -- floor too is fine there since floor==cap → always exactly 0.040.)
-    -- Without override: keep the existing 0.080 floor so normal pathfinds
-    -- still get a minimum budget regardless of distance.
-    local time_lb    = time_cap_override or 0.080
-    local time_limit = math.max(time_lb, math.min(time_cap, goal_dist * 0.024))
+    -- Without override: 0.040 floor keeps tiny targets from getting zero budget;
+    -- the scale hits the cap at ~33u so mid/far targets use the full tier cap.
+    -- Previous 0.080 floor was defeating the 0.070 far-target cap (max(0.080,
+    -- min(0.070,...)) always returned 0.080, making the 70ms tier dead code).
+    local time_lb    = time_cap_override or 0.040
+    local time_limit = math.max(time_lb, math.min(time_cap, goal_dist * 0.003))
     -- When per-call budget is provided, also raise iter_limit proportionally
     -- so an early iter-cap doesn't fire before the time budget is consumed.
     -- Estimate ~40μs per iteration (conservative). Cap at existing maximum.

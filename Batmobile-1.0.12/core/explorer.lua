@@ -363,25 +363,26 @@ local select_node_distance = function ()
         end
     end
     if furthest_node == nil then
-        local index = explorer.frontier_index
-        while index >= 0 do
-            local most_recent_str = explorer.frontier_order[index]
-            if most_recent_str ~= nil then
-                -- skip if node is visited
-                if explorer.visited[most_recent_str] ~= nil then
-                    remove_frontier(most_recent_str)
-                else
-                    local frontier_node = explorer.frontier_node[most_recent_str]
-                    local dist  = utils.distance(frontier_node, check_pos)
-                    local score = dist - direction_penalty(frontier_node, explorer.cur_pos)
-                    if furthest_node == nil or score > furthers_dist then
-                        furthest_node = frontier_node
-                        furthers_dist = score
-                        furthest_node_str = most_recent_str
-                    end
+        -- Iterate only active frontier entries (pairs over frontier_node) instead
+        -- of walking the full frontier_index range (which includes nil holes from
+        -- removed entries and grows unboundedly in long sessions).
+        local to_evict = nil
+        for node_str, fnode in pairs(explorer.frontier_node) do
+            if explorer.visited[node_str] ~= nil then
+                if to_evict == nil then to_evict = {} end
+                to_evict[#to_evict + 1] = node_str
+            else
+                local dist  = utils.distance(fnode, check_pos)
+                local score = dist - direction_penalty(fnode, explorer.cur_pos)
+                if furthest_node == nil or score > furthers_dist then
+                    furthest_node     = fnode
+                    furthers_dist     = score
+                    furthest_node_str = node_str
                 end
             end
-            index = index - 1
+        end
+        if to_evict ~= nil then
+            for _, ns in ipairs(to_evict) do remove_frontier(ns) end
         end
     end
     if furthest_node ~= nil and
@@ -488,27 +489,30 @@ local select_node_direction = function (failed)
     -- if no unvisited perimeter, find the lowest-penalty in-range frontier
     -- (was: first-in-range; now picks among all in-range to avoid favouring
     -- a candidate that points into a known-failed bearing).
+    -- Iterate pairs(frontier_node) instead of walking frontier_index down to 0:
+    -- frontier_index is a monotonically-increasing insert counter that grows
+    -- unboundedly (nil holes accumulate from removed entries), making the old
+    -- loop O(ever-inserted) not O(currently-active).  pairs() skips nils natively.
     local best_str, best_node, best_penalty
-    local index = explorer.frontier_index
-    while index >= 0 do
-        local most_recent_str = explorer.frontier_order[index]
-        if most_recent_str ~= nil then
-            if explorer.visited[most_recent_str] ~= nil then
-                remove_frontier(most_recent_str)
-            else
-                local frontier_node = explorer.frontier_node[most_recent_str]
-                if utils.distance(frontier_node, explorer.cur_pos) <= explorer.frontier_max_dist then
-                    local p = direction_penalty(frontier_node, explorer.cur_pos)
-                    if best_node == nil or p < best_penalty then
-                        best_node    = frontier_node
-                        best_str     = most_recent_str
-                        best_penalty = p
-                        if p == 0 then break end  -- can't beat zero-penalty pick
-                    end
+    local to_evict = nil
+    for node_str, fnode in pairs(explorer.frontier_node) do
+        if explorer.visited[node_str] ~= nil then
+            if to_evict == nil then to_evict = {} end
+            to_evict[#to_evict + 1] = node_str
+        else
+            if utils.distance(fnode, explorer.cur_pos) <= explorer.frontier_max_dist then
+                local p = direction_penalty(fnode, explorer.cur_pos)
+                if best_node == nil or p < best_penalty then
+                    best_node    = fnode
+                    best_str     = node_str
+                    best_penalty = p
+                    if p == 0 then break end  -- can't beat zero-penalty pick
                 end
             end
         end
-        index = index - 1
+    end
+    if to_evict ~= nil then
+        for _, ns in ipairs(to_evict) do remove_frontier(ns) end
     end
     if best_node ~= nil then
         remove_frontier(best_str)

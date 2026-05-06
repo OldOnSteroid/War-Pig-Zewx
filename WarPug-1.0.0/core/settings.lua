@@ -4,7 +4,7 @@ local gui = require 'gui'
 -- (use the debug/actor-dump tools — look for an actor near the war plan board
 -- in Temis). When blank, WarPug relies on warplan.is_ready() being true
 -- already; if the panel is also closed it will log a warning and stay IDLE.
-local TABLE_ACTOR_NAME = ''
+local TABLE_ACTOR_NAME = 'Warplans_Vendor'
 
 local settings = {
     plugin_label     = gui.plugin_label,
@@ -20,30 +20,18 @@ local settings = {
     verbose_logs     = false,
 }
 
-local function get_screen_width()
-    if utility and type(utility.get_screen_width) == 'function' then
-        local ok, w = pcall(utility.get_screen_width)
-        if ok and type(w) == 'number' then return w end
-    end
-    return 1920
-end
-
 settings.update_settings = function()
-    settings.enabled          = gui.elements.main_toggle:get()
+    settings.enabled           = gui.elements.main_toggle:get()
     settings.show_click_points = gui.elements.show_click_points:get()
-    settings.verbose_logs     = gui.elements.verbose_logs:get()
+    settings.verbose_logs      = gui.elements.verbose_logs:get()
 
-    if get_screen_width() >= 3840 then
-        settings.reroll_click_x   = gui.elements.reroll_click_x_8k:get()
-        settings.reroll_click_y   = gui.elements.reroll_click_y_8k:get()
-        settings.reroll_confirm_x = gui.elements.reroll_confirm_x_8k:get()
-        settings.reroll_confirm_y = gui.elements.reroll_confirm_y_8k:get()
-    else
-        settings.reroll_click_x   = gui.elements.reroll_click_x:get()
-        settings.reroll_click_y   = gui.elements.reroll_click_y:get()
-        settings.reroll_confirm_x = gui.elements.reroll_confirm_x:get()
-        settings.reroll_confirm_y = gui.elements.reroll_confirm_y:get()
-    end
+    -- Pick the resolution preset whose width best matches the actual screen.
+    local res     = gui.pick_resolution(gui.get_screen_width())
+    local sliders = gui.res_sliders[res.key]
+    settings.reroll_click_x   = sliders.reroll_x:get()
+    settings.reroll_click_y   = sliders.reroll_y:get()
+    settings.reroll_confirm_x = sliders.confirm_x:get()
+    settings.reroll_confirm_y = sliders.confirm_y:get()
 end
 
 return settings

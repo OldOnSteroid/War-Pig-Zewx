@@ -29,14 +29,16 @@ end
 local render_pulse = function()
     -- Click-position overlays are shown regardless of enable state so the
     -- user can calibrate coordinates with the plugin paused.
-    if settings.show_click_points then
-        local rx = settings.reroll_click_x
-        local ry = settings.reroll_click_y
+    if gui.elements.show_click_points:get() then
+        -- Read directly from the active resolution's sliders every frame so
+        -- crosshairs track the slider in real-time while dragging.
+        local res     = gui.pick_resolution(gui.get_screen_width())
+        local sl      = gui.res_sliders[res.key]
+        local rx, ry  = sl.reroll_x:get(),  sl.reroll_y:get()
+        local cx, cy  = sl.confirm_x:get(), sl.confirm_y:get()
         if rx > 0 and ry > 0 then
             draw_crosshair(rx, ry, 'Reroll', COL_CROSSHAIR)
         end
-        local cx = settings.reroll_confirm_x
-        local cy = settings.reroll_confirm_y
         if cx > 0 and cy > 0 then
             draw_crosshair(cx, cy, 'RerollConfirm', COL_CROSSHAIR)
         end

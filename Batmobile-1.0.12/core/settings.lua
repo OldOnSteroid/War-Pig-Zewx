@@ -21,7 +21,7 @@ local settings = {
     log_level = gui.log_levels_enum['INFO'],
     nav_viz = false,
     require_full_path_explore = false,
-    explore_path_budget_ms = 150,
+    explore_path_budget_ms = 80,
 }
 
 settings.update_settings = function ()

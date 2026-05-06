@@ -44,6 +44,7 @@ local task_files = {
     'exit_undercity',
     -- 'follower',
     'explore_undercity',
+    'custom_explorer',
     'idle'
 }
 for _, file in ipairs(task_files) do

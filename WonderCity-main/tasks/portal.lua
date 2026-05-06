@@ -37,7 +37,6 @@ end
 local get_portal_warp_pad = function ()
     local local_player = get_local_player()
     if not local_player then return end
-    local player_pos = get_player_position()
     local actors = actors_manager:get_ally_actors()
     for _, actor in pairs(actors) do
         local actor_name = actor:get_skin_name()
@@ -51,7 +50,18 @@ local get_portal_warp_pad = function ()
     return nil
 end
 
+local is_in_boss_room = function ()
+    local actors = actors_manager:get_all_actors()
+    for _, actor in pairs(actors) do
+        if actor:get_skin_name() == 'Healing_Well_Basic' then
+            return true
+        end
+    end
+    return false
+end
+
 task.shouldExecute = function ()
+    if is_in_boss_room() then return false end
     return utils.player_in_undercity() and
         (get_portal_warp_pad() ~= nil or task.portal_found or
         task.portal_exit + 1 >= get_time_since_inject())
