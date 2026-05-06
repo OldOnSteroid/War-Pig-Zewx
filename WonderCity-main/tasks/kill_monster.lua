@@ -79,7 +79,7 @@ task.shouldExecute = function ()
     local _, _, _, boss, priority = get_closest_enemies()
     local target = boss or priority
     return target ~= nil and
-        utils.player_in_undercity
+        utils.player_in_undercity()
 end
 task.Execute = function ()
     local local_player = get_local_player()

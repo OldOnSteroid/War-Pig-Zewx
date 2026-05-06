@@ -197,6 +197,7 @@ end
 -- Lookahead is capped (LOS_MAX_LOOKAHEAD) to bound LOS work on long paths.
 local LOS_MAX_LOOKAHEAD = 30
 local function string_pull(path, step)
+    if step <= 0 then return path end
     if #path <= 2 then return path end
     local out = {path[1]}
     local i = 1
@@ -310,7 +311,8 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
     local skip_wall_ring = goal_dist > 25
 
     -- Pre-compute directions once per find_path call
-    local dist = settings.step
+    local dist        = settings.step
+    local smooth_step = settings.path_smooth_step
     local directions = {
         {-dist, 0},
         {0,  dist},
@@ -345,7 +347,7 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
             utils.log(1, 'no path (over limit) ' .. utils.vec_to_string(start) .. '>' .. utils.vec_to_string(goal))
             -- Return partial path to the closest node we reached
             if best_node_str ~= start_str then
-                local partial = pull_bench(reconstruct_path(closed_set, prev_nodes, best_node), dist)
+                local partial = pull_bench(reconstruct_path(closed_set, prev_nodes, best_node), smooth_step)
                 utils.log(1, 'returning partial path #' .. #partial .. ' best_h=' .. string.format('%.1f', best_node_h))
                 return pf_return(partial, true, "limit_partial")
             end
@@ -361,7 +363,7 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
 
         if utils.distance(cur_node, goal_node) == 0 then
             utils.log(2, 'path found')
-            local pulled = pull_bench(reconstruct_path(closed_set, prev_nodes, cur_node), dist)
+            local pulled = pull_bench(reconstruct_path(closed_set, prev_nodes, cur_node), smooth_step)
             return pf_return(pulled, false, "found")
         end
 
@@ -404,7 +406,7 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
     utils.log(1, 'no path (no openset) ' .. utils.vec_to_string(start) .. '>' .. utils.vec_to_string(goal))
     -- Return partial path to the closest node we reached
     if best_node_str ~= start_str then
-        local partial = pull_bench(reconstruct_path(closed_set, prev_nodes, best_node), dist)
+        local partial = pull_bench(reconstruct_path(closed_set, prev_nodes, best_node), smooth_step)
         utils.log(1, 'returning partial path #' .. #partial .. ' best_h=' .. string.format('%.1f', best_node_h))
         return pf_return(partial, true, "noopen_partial")
     end
@@ -440,7 +442,8 @@ pathfinder.find_path_debug = function(start, goal, opts)
     local HARD_ITER_LIMIT = (opts and opts.iter_cap) or 100000
     local HARD_TIME_LIMIT = (opts and opts.time_cap) or 15.0
 
-    local dist = settings.step
+    local dist        = settings.step
+    local smooth_step = settings.path_smooth_step
     local directions = {
         {-dist, 0}, {0, dist}, {dist, 0}, {0, -dist},
         {-dist, dist}, {-dist, -dist}, {dist, dist}, {dist, -dist},
@@ -452,13 +455,13 @@ pathfinder.find_path_debug = function(start, goal, opts)
     while not heap:empty() do
         if counter >= HARD_ITER_LIMIT then
             if best_node_str ~= start_str then
-                return string_pull(reconstruct_path(closed_set, prev_nodes, best_node), dist), counter, os.clock() - t0, "iter_limit_partial"
+                return string_pull(reconstruct_path(closed_set, prev_nodes, best_node), smooth_step), counter, os.clock() - t0, "iter_limit_partial"
             end
             return nil, counter, os.clock() - t0, "iter_limit"
         end
         if (os.clock() - t0) >= HARD_TIME_LIMIT then
             if best_node_str ~= start_str then
-                return string_pull(reconstruct_path(closed_set, prev_nodes, best_node), dist), counter, os.clock() - t0, "time_limit_partial"
+                return string_pull(reconstruct_path(closed_set, prev_nodes, best_node), smooth_step), counter, os.clock() - t0, "time_limit_partial"
             end
             return nil, counter, os.clock() - t0, "time_limit"
         end
@@ -470,7 +473,7 @@ pathfinder.find_path_debug = function(start, goal, opts)
 
         counter = counter + 1
         if utils.distance(cur_node, goal_node) == 0 then
-            return string_pull(reconstruct_path(closed_set, prev_nodes, cur_node), dist), counter, os.clock() - t0, "found"
+            return string_pull(reconstruct_path(closed_set, prev_nodes, cur_node), smooth_step), counter, os.clock() - t0, "found"
         end
         closed_set[cur_str] = cur_node
 
@@ -501,7 +504,7 @@ pathfinder.find_path_debug = function(start, goal, opts)
     end
 
     if best_node_str ~= start_str then
-        return string_pull(reconstruct_path(closed_set, prev_nodes, best_node), dist), counter, os.clock() - t0, "no_path_partial"
+        return string_pull(reconstruct_path(closed_set, prev_nodes, best_node), smooth_step), counter, os.clock() - t0, "no_path_partial"
     end
     return nil, counter, os.clock() - t0, "no_path"
 end

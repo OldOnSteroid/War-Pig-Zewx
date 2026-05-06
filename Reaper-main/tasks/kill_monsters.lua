@@ -52,8 +52,7 @@ end
 function task.shouldExecute()
     if not in_target_boss_zone() then return false end
     if not tracker.altar_activated then return false end
-    if utils.get_suppressor() then return true end
-    return utils.get_closest_enemy() ~= nil
+    return true
 end
 
 function task.Execute()

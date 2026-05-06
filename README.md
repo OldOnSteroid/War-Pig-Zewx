@@ -85,6 +85,13 @@ A few quest suffixes are best-guesses (anything not marked CONFIRMED in `WarPigs
 
 ## Changelog
 
+### 2026-05-06
+- **Batmobile: path smoothing is now configurable**. New "Path smoothing step" slider (0–10, default 1.0) controls the LOS sample interval used when string-pulling A* paths. 0 disables smoothing entirely (raw grid path, safest near thin walls); 3–10 produces super-smooth paths with very few corners. Both `find_path` and `find_path_debug` use it.
+- **WarPigs: teleport gate also waits on `pending_disable`**. Previously the orchestrator would happily fire `warplan.teleport_to_activity()` while the outgoing plugin's `disable_when` was still un-satisfied — so e.g. Hordes would still be wrapping up loot when we tried to teleport away. Gate now blocks until pending disables clear, and an in-flight teleport aborts if a pending disable appears mid-sequence. Task-only handoffs (TurnIn_Rewards manages its own teleports) skip the warplan call entirely.
+- **Reaper: `kill_monsters` always runs while altar is active**. `shouldExecute` was bailing when no enemy was currently visible — but in the boss arena the bot would idle through fade-in / wave gaps. Now stays active for the whole altar-on window.
+- **WonderCity: `kill_monster.shouldExecute` actually checks zone**. `utils.player_in_undercity` was being passed as a function value (always truthy) instead of being called — so the task ran outside the undercity. Added parens. Fixes phantom kill loops in town. Also added a one-shot per-run actor dump in `portal.lua` for tuning boss-room detection.
+- **Reaper: `kill_monsters.reset()` no longer unblocks movement**. Other Reaper tasks expected `block_movement` to stay on between phases; clearing it on reset broke their assumptions.
+
 ### 2026-05-05
 - **ArkhamAsylum: progress-orb pickup during pit explore**. Pit explore now scans for `TWR_ProgressOrb` actors every tick and walks straight to any within range via `BatmobilePlugin.navigate_long_path`, instead of waiting for Batmobile's frontier exploration to drift past one organically. Repaths every 2 s if Batmobile drops the long path; stops when within 5 units of the orb so the existing interactable-pickup logic takes over.
 - **Reaper: orbwalker actually on during boss combat**. `kill_monsters.Execute()` now sets `orbwalker.set_clear_toggle(true)` + `set_block_movement(true)` at the top of every tick (and a new `task.reset()` clears both). Previously relied on whatever the previous task left behind — which after the altar interact was "off". `kill_monsters` was therefore running in a no-cast state until something else flipped orbwalker back on.

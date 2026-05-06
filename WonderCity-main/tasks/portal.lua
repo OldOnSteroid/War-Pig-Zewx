@@ -50,11 +50,24 @@ local get_portal_warp_pad = function ()
     return nil
 end
 
+local boss_room_scan_last_run = nil
 local is_in_boss_room = function ()
     local actors = actors_manager:get_all_actors()
     for _, actor in pairs(actors) do
         if actor:get_skin_name() == 'Healing_Well_Basic' then
             return true
+        end
+    end
+    -- One-shot actor dump per undercity run so we can find the real healing well name
+    if utils.player_in_undercity() and boss_room_scan_last_run ~= tracker.undercity_start_time then
+        boss_room_scan_last_run = tracker.undercity_start_time
+        local seen = {}
+        for _, actor in pairs(actors_manager:get_all_actors()) do
+            local name = actor:get_skin_name()
+            if not seen[name] then
+                seen[name] = true
+                console.print('[WonderCity:portal] actor_scan | ' .. name)
+            end
         end
     end
     return false

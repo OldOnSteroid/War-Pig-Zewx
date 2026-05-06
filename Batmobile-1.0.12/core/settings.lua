@@ -22,6 +22,7 @@ local settings = {
     nav_viz = false,
     require_full_path_explore = false,
     explore_path_budget_ms = 80,
+    path_smooth_step = 1.0,
 }
 
 settings.update_settings = function ()
@@ -42,6 +43,7 @@ settings.update_settings = function ()
     settings.nav_viz   = gui.elements.nav_viz:get()
     settings.require_full_path_explore = gui.elements.require_full_path_explore:get()
     settings.explore_path_budget_ms    = gui.elements.explore_path_budget_ms:get()
+    settings.path_smooth_step          = gui.elements.path_smooth_step:get()
 end
 
 return settings

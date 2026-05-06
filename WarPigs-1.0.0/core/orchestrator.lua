@@ -883,11 +883,15 @@ function orchestrator.tick()
             and (now - teleport_incoming_first_seen) >= TELEPORT_INCOMING_SETTLE
         local alfred_done = alfred_idle()
 
-        local ready = has_incoming and incoming_settled and alfred_done
+        local has_pending = next(pending_disable) ~= nil
+        local ready = has_incoming and incoming_settled and alfred_done and not has_pending
         if not ready then
             local reason
             if not has_incoming then
                 reason = 'no incoming activity yet'
+            elseif has_pending then
+                local pname = next(pending_disable)
+                reason = 'waiting for ' .. tostring(pname) .. ' to finish (deferred disable)'
             elseif not alfred_done then
                 reason = 'Alfred busy (loot/salvage in progress)'
             else
@@ -902,6 +906,12 @@ function orchestrator.tick()
             teleport_pending             = false
             teleport_incoming_first_seen = nil
             teleport_holding_logged      = false
+            -- Task entries (e.g. TurnIn_Rewards) manage their own navigation
+            -- via teleport_to_waypoint — they don't use warplan.teleport_to_activity().
+            -- If only a task matched (no plugin entry in wants), skip the
+            -- warplan teleport entirely so we don't loop on a zone that won't
+            -- change (e.g. TurnIn_Rewards while already in Temis).
+            local task_only_incoming = next(wants) == nil
             -- If the incoming plugin's quest actor is already visible we are
             -- already at the destination (e.g. in Temis for Pit/Undercity).
             -- Calling warplan.teleport_to_activity() would be a no-op and the
@@ -913,7 +923,10 @@ function orchestrator.tick()
                     break
                 end
             end
-            if already_arrived then
+            if task_only_incoming then
+                log('teleport skipped — incoming is task-only (handles own navigation)')
+                -- State stays IDLE; enable gate clears on the next tick.
+            elseif already_arrived then
                 log('teleport skipped — quest actor present, already at destination')
                 -- State stays IDLE; enable gate clears on the next tick.
             else
@@ -936,7 +949,19 @@ function orchestrator.tick()
         end
     end
     if teleport_transition.state == 'TELEPORTING' then
-        if (now - teleport_transition.started_at) >= TELEPORT_CHECK_INTERVAL then
+        -- If a deferred-disable is still pending, abort the teleport — the
+        -- outgoing plugin (e.g. InfernalHordes) hasn't finished yet.
+        local blocking_pending
+        for p in pairs(pending_disable) do blocking_pending = p; break end
+        if blocking_pending then
+            log('teleport aborted — deferred disable pending for ' .. tostring(blocking_pending))
+            teleport_transition.state      = 'IDLE'
+            teleport_transition.snap_world = nil
+            teleport_transition.snap_zone  = nil
+            teleport_pending               = false
+            teleport_incoming_first_seen   = nil
+            teleport_holding_logged        = false
+        elseif (now - teleport_transition.started_at) >= TELEPORT_CHECK_INTERVAL then
             local w         = get_current_world()
             local cur_world = w and w:get_name()
             local cur_zone  = w and w:get_current_zone_name()

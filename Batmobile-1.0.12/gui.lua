@@ -59,6 +59,7 @@ gui.elements = {
     use_aoj = create_checkbox(true, "use_aoj"),
     require_full_path_explore = create_checkbox(false, "require_full_path_explore"),
     explore_path_budget_ms = slider_int:new(50, 500, 150, get_hash(plugin_label .. '_explore_path_budget_ms')),
+    path_smooth_step = slider_float:new(0.0, 10.0, 1.0, get_hash(plugin_label .. '_path_smooth_step')),
     advanced_tree = tree_node:new(1),
     max_iteration = slider_int:new(250, 5000, 1500, get_hash(plugin_label .. '_' .. 'max_iteration')),
     debug_tree = tree_node:new(1),
@@ -111,6 +112,13 @@ function gui.render()
             'Higher = handles longer winding paths correctly but costs more CPU per pick.\n' ..
             '150ms is reasonable; 300ms+ will cause noticeable lag on busy floors.')
     end
+    gui.elements.path_smooth_step:render('Path smoothing step',
+        'LOS sample interval used when simplifying A* paths (string-pull).\n' ..
+        '0 = disabled (raw A* grid path, maximum safety near thin walls).\n' ..
+        '0.5-1.0 = conservative (tight sampling, follows grid closely).\n' ..
+        '1.0-3.0 = normal range (default 1.0).\n' ..
+        '3.0-10.0 = super smooth (very few LOS samples, longest straight segments).\n' ..
+        'Raise if paths look jagged or the bot over-corrects; lower/disable if it clips small pillars.', 1)
     if gui.elements.debug_tree:push('Debug') then
         gui.elements.freeroam_keybind_toggle:render('Toggle explorer', 'enable freeroam explorer')
         render_menu_header('WARNING running explorer in overworld can cause big lag spike due to multiple elevation and traversals close by')
