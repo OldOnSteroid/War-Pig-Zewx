@@ -41,11 +41,14 @@ local function alfred_idle()
     if not ok or type(s) ~= 'table' then return true end
     -- Not enabled = nothing to wait on.
     if not s.enabled then return true end
-    -- Paused-by-another-plugin (external_pause=true) means Alfred is held
-    -- idle by some prior plugin (e.g. HelltideRevamped paused Alfred while
-    -- it ran helltide; HR doesn't resume on disable, so Alfred sits paused
-    -- forever). Paused = not actively doing work, safe for our teleport.
-    if s.paused then return true end
+    -- Paused: only safe to skip if Alfred has nothing pending. If need_trigger
+    -- or inventory_full is set Alfred wants to salvage/stash but can't self-start
+    -- while paused — alfred_kick_if_needed() will resume it; we hold the gate
+    -- here so the teleport doesn't fire before Alfred finishes.
+    if s.paused then
+        if s.need_trigger or s.inventory_full then return false end
+        return true
+    end
     -- trigger_tasks is the live "Alfred is processing its queue" flag —
     -- Alfred's status task sets it true when there's work pending and
     -- clears it when the queue completes. Don't use all_task_done here:
@@ -54,6 +57,36 @@ local function alfred_idle()
     -- nothing for Alfred to do it gates us forever.
     if s.trigger_tasks then return false end
     return true
+end
+
+-- When Alfred is paused but has work to do (need_trigger / inventory_full) and
+-- the player is in town, resume and trigger it so it can run before the next
+-- teleport. Called each tick while teleport_pending is true so it fires as soon
+-- as we land in town after a pit/undercity/horde exit. Only acts while paused —
+-- once resumed, Alfred's own loop takes over and alfred_idle() gates on
+-- trigger_tasks clearing, so we won't double-fire.
+local function alfred_kick_if_needed()
+    -- Inline in-town check (in_town_disable_when is defined later in this file).
+    local _lp = get_local_player()
+    if not _lp then return end
+    if _G.attributes and _G.attributes.PLAYER_IN_TOWN_LEVEL_AREA ~= nil then
+        local _ok, _val = pcall(function()
+            return _lp:get_attribute(attributes.PLAYER_IN_TOWN_LEVEL_AREA) == 1
+        end)
+        if not (_ok and _val == true) then return end
+    end
+    local alfred = _G.AlfredTheButlerPlugin
+    if not alfred or type(alfred.get_status) ~= 'function' then return end
+    local ok, s = pcall(alfred.get_status)
+    if not ok or type(s) ~= 'table' then return end
+    if not s.enabled then return end
+    if not s.paused then return end
+    if not (s.need_trigger or s.inventory_full) then return end
+    if type(alfred.resume) == 'function' then pcall(alfred.resume) end
+    if type(alfred.trigger_tasks) == 'function' then
+        pcall(alfred.trigger_tasks, 'WarPigs')
+    end
+    log('Alfred was paused with work pending — resumed and triggered (in town, pre-transition)')
 end
 
 local teleport_transition = {
@@ -345,12 +378,22 @@ orchestrator.quest_plugin_map = {
         enable = function(p) p.run_boss('beast') end,
         disable_when = reaper_kill_disable_when,
     },
-    WarPlans_QST_BossLair_Beast = {          -- display-name guess
+    WarPlans_QST_BossLair_Beast = {          -- display-name guess (also matches BeastInIce via substring)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('beast') end,
         disable_when = reaper_kill_disable_when,
     },
     WarPlans_QST_BossLair_BeastInIce = {     -- display-name (full) guess
+        plugin = 'ReaperPlugin',
+        enable = function(p) p.run_boss('beast') end,
+        disable_when = reaper_kill_disable_when,
+    },
+    WarPlans_QST_BossLair_IceBeast = {       -- guess (alternate word order)
+        plugin = 'ReaperPlugin',
+        enable = function(p) p.run_boss('beast') end,
+        disable_when = reaper_kill_disable_when,
+    },
+    WarPlans_QST_BossLair_Wendigo = {        -- guess (lore name for Beast in Ice)
         plugin = 'ReaperPlugin',
         enable = function(p) p.run_boss('beast') end,
         disable_when = reaper_kill_disable_when,
@@ -390,6 +433,14 @@ local pending_disable_since = {}  -- plugin_name -> time when deferral started (
 local last_disable_time     = {}  -- plugin_name -> time the disable actually fired (for TRANSITION_GAP_SECONDS gate)
 local enable_blocked        = {}  -- plugin_name -> last gate-reason logged (suppresses repeat logs)
 local was_off        = {}  -- plugin_name -> true (we believe it is currently off; suppresses repeated logs)
+-- Same-activity continuation: when the same plugin re-matches within this
+-- window after being disabled (e.g. back-to-back helltide WarPlans), cancel
+-- the pending teleport so we don't fire warplan.teleport_to_activity() while
+-- the plugin is already positioned in the right zone.
+local last_disabled_plugin = nil
+local last_disabled_at     = -math.huge
+local last_disabled_reason = nil   -- quest pattern that triggered the last disable
+local SAME_ACTIVITY_SECS   = 30.0
 -- Track which trigger pattern was last used to enable each plugin. When the
 -- matched pattern changes mid-run (e.g. ReaperPlugin running Zir but a new
 -- Varshan WarPlan appears before Zir's kill+60s defer satisfies), re-fire
@@ -488,8 +539,11 @@ local function plugin_disable(entry)
         end
     end
     owned[entry.plugin] = nil
+    last_disabled_reason = last_enabled_reason[entry.plugin]
     last_enabled_reason[entry.plugin] = nil
     last_disable_time[entry.plugin] = get_time_since_inject()
+    last_disabled_plugin = entry.plugin
+    last_disabled_at     = get_time_since_inject()
     -- Arm the teleport sequence for the NEXT activity. plugin_disable only
     -- fires after disable_when has satisfied (Reaper: kill+60s, Pit/WC: in
     -- town after Alfred salvage), so we're in a clean state to teleport.
@@ -869,6 +923,30 @@ function orchestrator.tick()
         end
     end
 
+    -- ── SAME-ACTIVITY CONTINUATION ──────────────────────────────────────────
+    -- If the plugin we just disabled is the incoming activity (same quest
+    -- pattern re-matched, e.g. back-to-back helltide WarPlans), skip the
+    -- warplan teleport entirely. The player is already in the right zone and
+    -- firing warplan.teleport_to_activity() would either do nothing (world/zone
+    -- unchanged → retry loop) or fight with the plugin's own navigation.
+    -- The transition gap (last_disable_time) still applies, giving the game
+    -- state a beat to settle before the plugin re-enables.
+    if teleport_pending
+        and last_disabled_plugin
+        and wants[last_disabled_plugin]
+        and (now - last_disabled_at) <= SAME_ACTIVITY_SECS
+        and matched_reason[last_disabled_plugin] == last_disabled_reason
+    then
+        log(string.format(
+            '%s: same-activity continuation pattern=%s (%.1fs since disable) — cancelling teleport, re-enable in place',
+            last_disabled_plugin, tostring(last_disabled_reason), now - last_disabled_at))
+        teleport_pending             = false
+        teleport_incoming_first_seen = nil
+        teleport_holding_logged      = false
+        last_disabled_plugin         = nil
+        last_disabled_reason         = nil
+    end
+
     -- ── TELEPORT TRANSITION (optional) ──────────────────────────────────────
     -- After an activity ends, call warplan.teleport_to_activity() and wait
     -- for the channel to settle before enabling the next plugin. We hold the
@@ -897,6 +975,7 @@ function orchestrator.tick()
         end
         local incoming_settled = teleport_incoming_first_seen
             and (now - teleport_incoming_first_seen) >= TELEPORT_INCOMING_SETTLE
+        alfred_kick_if_needed()
         local alfred_done = alfred_idle()
 
         local has_pending = next(pending_disable) ~= nil
@@ -1125,13 +1204,29 @@ function orchestrator.release_all()
     had_turn_in_complete     = false
     pit_filler_active_logged = false
     recent_clicks            = {}
+    last_disabled_plugin     = nil
+    last_disabled_at         = -math.huge
+    last_disabled_reason     = nil
 end
 
 function orchestrator.get_status_line()
     local names = {}
     for n in pairs(owned) do names[#names+1] = n end
-    if #names == 0 then return 'WarPigs: watching quests' end
-    return 'WarPigs: managing ' .. table.concat(names, ', ')
+    if #names > 0 then return 'WarPigs: managing ' .. table.concat(names, ', ') end
+    -- Show active task state so "watching quests" doesn't mask turn-in work.
+    for pattern in pairs(last_matches) do
+        local raw_entry = orchestrator.quest_plugin_map[pattern]
+        if raw_entry then
+            local entry = normalize(raw_entry)
+            if entry.task then
+                local task_label = pattern:gsub('WarPlans_QST_', '')
+                local task_state = type(entry.task.get_state) == 'function'
+                    and entry.task.get_state() or '?'
+                return 'WarPigs: task ' .. task_label .. ' [' .. task_state .. ']'
+            end
+        end
+    end
+    return 'WarPigs: watching quests'
 end
 
 return orchestrator

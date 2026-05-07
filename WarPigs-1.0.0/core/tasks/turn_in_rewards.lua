@@ -10,9 +10,14 @@ local TEMIS_ZONE = 'Skov_Temis'
 local NPC_NAME    = 'NPC_QST_X2_Tyrael_NonCombat'
 local VENDOR_NAME = 'Warplans_Vendor'  -- reroll war plan vendor
 
-local INTERACT_DIST     = 3.0
-local INTERACT_COOLDOWN = 1.5
-local TELEPORT_TIMEOUT  = 30.0
+local INTERACT_DIST           = 3.0
+local INTERACT_COOLDOWN       = 1.5
+local TELEPORT_TIMEOUT        = 30.0
+-- How long to wait for the dungeon-exit plugin to land us in town before we
+-- give up and teleport ourselves. Covers the case where ArkhamAsylum (or
+-- WonderCity / HordeDev) self-disabled inside the dungeon, leaving nobody to
+-- navigate the player out.
+local STUCK_NOT_IN_TOWN_SECS  = 20.0
 
 local STATE = {
     IDLE         = 'IDLE',
@@ -29,8 +34,9 @@ local last_diag     = -999
 -- resets state to IDLE and the next tick(true) re-fires the IDLE→teleport
 -- branch. Without this, two teleport calls within ~5s cancel each other
 -- mid-channel. 6s comfortably covers the channel.
-local TELEPORT_DEBOUNCE_S = 6.0
-local last_teleport_time  = -math.huge
+local TELEPORT_DEBOUNCE_S     = 6.0
+local last_teleport_time      = -math.huge
+local stuck_not_in_town_since = nil
 
 local DIAG_INTERVAL = 4.0  -- seconds between "NPC not found" diagnostic dumps
 
@@ -115,6 +121,7 @@ function M.tick(active)
             log('Quest gone — resetting.')
             set_state(STATE.IDLE)
         end
+        stuck_not_in_town_since = nil
         return
     end
 
@@ -132,9 +139,25 @@ function M.tick(active)
         -- ends up running around interrupted in the dungeon. Wait for the
         -- dungeon plugin to land us in a town first, THEN if it isn't Temis
         -- we hop over.
+        -- Escape hatch: if the exit plugin self-disabled inside the dungeon
+        -- (e.g. ArkhamAsylum hit an internal error), nobody is driving the
+        -- player out. After STUCK_NOT_IN_TOWN_SECS we teleport ourselves so
+        -- the turn-in doesn't block forever.
         if not in_town_attribute() then
-            return  -- still in a non-town zone (pit / undercity / horde) — let exit_* finish
+            stuck_not_in_town_since = stuck_not_in_town_since or now()
+            local waited = now() - stuck_not_in_town_since
+            if waited >= STUCK_NOT_IN_TOWN_SECS
+               and (now() - last_teleport_time) >= TELEPORT_DEBOUNCE_S then
+                log(string.format(
+                    'Stuck outside town for %.0fs — escape-teleporting to Temis (exit plugin may be gone).',
+                    waited))
+                teleport_to_waypoint(TEMIS_WP)
+                last_teleport_time = now()
+                set_state(STATE.TELEPORTING)
+            end
+            return
         end
+        stuck_not_in_town_since = nil
         if (now() - last_teleport_time) < TELEPORT_DEBOUNCE_S then
             return  -- recent teleport channel still completing
         end

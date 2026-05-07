@@ -8,9 +8,16 @@
 --
 --  Pixel coords measured at 1920x1080, scaled to any res.
 --
---  Andariel:   wait → Open
---  Varshan:    wait → Modify → wait → Scroll → wait → Varshan → wait → Open
---  Others:     wait → Modify → wait → Boss   → wait → Open
+--  Sequence per target page:
+--    Page 1 (no scroll):  wait → Modify → wait → Boss → wait → Open
+--    Page 2 (must scroll): wait → Modify → wait → Scroll → wait → Boss → wait → Open
+--
+--  In-game chest menu layout (post game update):
+--    Page 1:  Beast, Butcher, Grigoire, Urivar, Varshan, Lord Zir, Andariel
+--    Page 2:  Varshan, Lord Zir, Andariel, Astaroth, Bartuc, Duriel, Harbinger
+--  The 3 bosses that appear on BOTH pages are routed via page 1 to
+--  skip the scroll click.  Astaroth, Bartuc, Duriel, and Harbinger are
+--  the only entries that require the scroll path.
 --
 --  Party retry:
 --    After clicking Open, if the chest is still interactable a
@@ -34,18 +41,64 @@ local function click(rx, ry)
     utility.send_mouse_click(x, y)
 end
 
--- Coords as ratios (measured px / reference res)
+-- ── Click coordinates (pixel ratios @ 1920x1080, scaled to any res) ─────────
+--
+-- Slot Y-positions for the boss list.  The first six slots reuse the
+-- coordinates that were measured for the OLD menu layout (those rows
+-- still exist, the bosses occupying them just shifted around in the
+-- new game version).  Slot 7 (~y=971) was extrapolated from the
+-- ~96px row spacing of slots 1-6.
+--
+-- !!! TODO: verify slot 7 (y=971) and the page-2 assignments below
+-- in-game.  If the visible row pixels shifted vs the old layout,
+-- adjust the SLOT_Y values; the page mapping itself (which boss is on
+-- which page) was provided by the operator and should be correct.
+local SLOT_Y = {
+    [1] =  397/1080,  -- (matches old: was 'duriel')
+    [2] =  495/1080,  -- (matches old: was 'grigoire')
+    [3] =  585/1080,  -- (matches old: was 'harbinger')
+    [4] =  683/1080,  -- (matches old: was 'zir')
+    [5] =  773/1080,  -- (matches old: was 'beast')
+    [6] =  875/1080,  -- (matches old: was 'urivar')
+    [7] =  971/1080,  -- TODO: verify (extrapolated)
+}
+local SLOT_X = 349/1920
+
+-- Per-boss page + slot.  Page 1 = visible without scrolling; page 2 =
+-- visible after one Scroll click.  Bosses present on BOTH pages are
+-- routed through page 1 to skip the scroll.
+local TARGETS = {
+    -- Page 1
+    beast     = { page = 1, slot = 1 },
+    butcher   = { page = 1, slot = 2 },
+    grigoire  = { page = 1, slot = 3 },
+    urivar    = { page = 1, slot = 4 },
+    varshan   = { page = 1, slot = 5 },
+    zir       = { page = 1, slot = 6 },
+    andariel  = { page = 1, slot = 7 },
+    -- Page 2 (must scroll)
+    astaroth  = { page = 2, slot = 4 },
+    bartuc    = { page = 2, slot = 5 },
+    duriel    = { page = 2, slot = 6 },
+    harbinger = { page = 2, slot = 7 },
+}
+
+local function click_target(boss_id)
+    local t = TARGETS[boss_id]
+    if not t then
+        console.print("[BelialChest] No click mapping for " .. tostring(boss_id))
+        return
+    end
+    click(SLOT_X, SLOT_Y[t.slot])
+end
+
+-- Static dialog buttons (Open / Modify / Scroll).  Y-coords carried
+-- over from the previous layout -- if these moved in the new game
+-- version, update them here.
 local C = {
-    open     = function() click(349/1920, 956/1080) end,
-    modify   = function() click(349/1920, 816/1080) end,
-    scroll   = function() click(629/1920, 858/1080) end,
-    duriel   = function() click(349/1920, 397/1080) end,
-    grigoire = function() click(349/1920, 495/1080) end,
-    harbinger= function() click(349/1920, 585/1080) end,
-    zir      = function() click(349/1920, 683/1080) end,
-    beast    = function() click(349/1920, 773/1080) end,
-    urivar   = function() click(349/1920, 875/1080) end,
-    varshan  = function() click(349/1920, 845/1080) end,
+    open   = function() click(349/1920, 956/1080) end,
+    modify = function() click(349/1920, 816/1080) end,
+    scroll = function() click(629/1920, 858/1080) end,
 }
 
 -- -------------------------------------------------------
@@ -153,13 +206,13 @@ function task.Execute()
     end
 
     -- ---- WAIT: 1.5s for dialog to render ----
+    -- Every target now goes through Modify → (Scroll if page 2) →
+    -- Select → Open.  The previous "Andariel skips Modify" shortcut
+    -- assumed Andariel was the dialog's default selection; that no
+    -- longer holds with the new menu order.
     if s.state == STATE.WAIT then
         if elapsed() >= 1.5 then
-            if s.target == "andariel" then
-                set_state(STATE.OPEN)
-            else
-                set_state(STATE.MODIFY)
-            end
+            set_state(STATE.MODIFY)
         end
         return
     end
@@ -167,7 +220,8 @@ function task.Execute()
     -- ---- MODIFY ----
     if s.state == STATE.MODIFY then
         C.modify()
-        if s.target == "varshan" then
+        local target_info = TARGETS[s.target]
+        if target_info and target_info.page == 2 then
             set_state(STATE.SCROLL)
         else
             set_state(STATE.SELECT)
@@ -175,7 +229,7 @@ function task.Execute()
         return
     end
 
-    -- ---- SCROLL (Varshan only) ----
+    -- ---- SCROLL (page-2 targets only) ----
     if s.state == STATE.SCROLL then
         if elapsed() >= 0.3 then
             C.scroll()
@@ -187,12 +241,7 @@ function task.Execute()
     -- ---- SELECT ----
     if s.state == STATE.SELECT then
         if elapsed() >= 0.3 then
-            local fn = C[s.target]
-            if fn then
-                fn()
-            else
-                console.print("[BelialChest] No button for " .. s.target)
-            end
+            click_target(s.target)
             set_state(STATE.OPEN)
         end
         return

@@ -42,16 +42,28 @@ enums.boss_zones = {
     { id="belial",    zone_prefix="Boss_Kehj_Belial",        label="Belial"              },
 }
 
--- Bosses selectable in the Belial chest UI (excludes Belial itself)
+-- Bosses selectable in the Belial chest UI (excludes Belial itself).
+--
+-- Order mirrors the in-game chest dialog after a recent game update:
+--   Page 1 (no scroll): Beast, Butcher, Grigoire, Urivar, Varshan,
+--                       Lord Zir, Andariel
+--   Page 2 (after scroll): Varshan, Lord Zir, Andariel, Astaroth, Bartuc,
+--                          Duriel, Harbinger of Hatred
+-- Bosses that appear on BOTH pages (Varshan / Zir / Andariel) are
+-- targeted via page 1 (no scroll required), so we list them only once.
+-- See tasks/belial_chest.lua for the page assignment + click coords.
 enums.belial_chest_bosses = {
-    { id="duriel",    label="Duriel"              },
-    { id="andariel",  label="Andariel"            },
-    { id="varshan",   label="Varshan"             },
+    { id="beast",     label="Beast in the Ice"    },
+    { id="butcher",   label="Bloody Butcher"      },
     { id="grigoire",  label="Grigoire"            },
-    { id="zir",       label="Lord Zir"            },
-    { id="beast",     label="Beast in Ice"        },
-    { id="harbinger", label="Harbinger of Hatred" },
     { id="urivar",    label="Urivar"              },
+    { id="varshan",   label="Varshan"             },
+    { id="zir",       label="Lord Zir"            },
+    { id="andariel",  label="Andariel"            },
+    { id="astaroth",  label="Astaroth"            },
+    { id="bartuc",    label="Bartuc"              },
+    { id="duriel",    label="Duriel"              },
+    { id="harbinger", label="Harbinger of Hatred" },
 }
 
 -- -------------------------------------------------------

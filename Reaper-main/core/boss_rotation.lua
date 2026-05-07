@@ -22,7 +22,7 @@ local rotation = {}
 rotation.boss_list   = {}
 rotation.current_idx = 1
 rotation.initialized = false
--- When true, the rotation was injected externally (e.g. by WarPigs via
+-- When true, the rotation was injected externally (e.g. by WarMachine via
 -- ReaperPlugin.run_boss). build() becomes a no-op so the inventory-derived
 -- rotation does not overwrite the external request. Cleared on disable.
 rotation.external    = false
@@ -113,7 +113,7 @@ function rotation.consume_run()
 
     -- External one-shot lockout: chest open + deadlock recovery can both end
     -- up calling consume_run, and we MUST NOT double-count the kill (would
-    -- offset WarPigs's reaper_kill_disable_when timer) or leave any opening
+    -- offset WarMachine's reaper_kill_disable_when timer) or leave any opening
     -- for the altar to re-fire. First call wins; rest are no-ops.
     if rotation.external and rotation.external_consumed then
         return
@@ -134,7 +134,7 @@ function rotation.consume_run()
         -- in-script counter drifted and we should correct it rather than skip the boss.
         --
         -- IMPORTANT: skip the material-correction reset for externally-injected
-        -- rotations (WarPigs etc.). External rotations are explicitly single-shot
+        -- rotations (WarMachine etc.). External rotations are explicitly single-shot
         -- (runs_remaining=1), and resetting the counter from inventory would loop
         -- the altar interaction forever — the orchestrator only wanted ONE kill.
         if boss.run_type == "material" and not rotation.external then

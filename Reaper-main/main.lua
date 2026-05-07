@@ -1,5 +1,5 @@
 -- ============================================================
---  Reaper  v1.0
+--  Reaper  v1.1
 --  by Magoogle
 --
 --  Flow per run:
@@ -244,6 +244,6 @@ ReaperPlugin = {
 }
 
 console.print("=============================================")
-console.print("  Reaper  v1.0  by Magoogle  - Loaded")
+console.print("  Reaper  v1.1  by Magoogle  - Loaded")
 console.print("  Enable in menu to start reaping")
 console.print("=============================================")

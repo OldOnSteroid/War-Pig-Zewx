@@ -1,4 +1,4 @@
-# Reaper v1.0
+# Reaper v1.1
 
 Farms bosses in a configured rotation using materials and/or lair boss sigils from your inventory. Each successful chest open counts as one completed run. When a boss's run count hits zero the script moves to the next queued boss, and disables itself when all are done.
 

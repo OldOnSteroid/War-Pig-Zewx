@@ -161,6 +161,8 @@ function task.shouldExecute()
 end
 
 function task.Execute()
+    orbwalker.set_clear_toggle(true)
+
     local t     = get_time_since_inject()
     local altar = utils.get_altar()
 
