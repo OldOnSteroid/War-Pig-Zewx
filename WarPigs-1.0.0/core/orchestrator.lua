@@ -148,6 +148,26 @@ local function in_town_disable_when()
     return ok and val == true
 end
 
+-- Predicate: does the player currently have the Helltide buff (= we're inside
+-- a helltide zone). Used as arrived_when for the Helltide WarPlans entry so
+-- WarPigs skips warplan.teleport_to_activity() when we're already in the right
+-- zone — without this, cold-start (or post-respawn re-arm) inside a helltide
+-- fires the teleport which is a no-op (world/zone unchanged) and loops on
+-- "teleport retry — world/zone unchanged" forever, fighting HR's chest /
+-- patrol work the whole time.
+local HELLTIDE_BUFF_HASH = 1066539
+local function has_helltide_buff()
+    local lp = get_local_player()
+    if not lp then return false end
+    local ok, buffs = pcall(function() return lp:get_buffs() end)
+    if not ok or type(buffs) ~= 'table' then return false end
+    for _, buff in ipairs(buffs) do
+        local ok2, hash = pcall(function() return buff.name_hash end)
+        if ok2 and hash == HELLTIDE_BUFF_HASH then return true end
+    end
+    return false
+end
+
 -- Reaper kill tracker. Reaper only exposes a monotonically-increasing
 -- total_runs counter, so we snapshot it at enable time and treat any increase
 -- after that as "boss died this run". The 60s post-kill defer covers loot
@@ -263,7 +283,18 @@ orchestrator.quest_plugin_map = {
     -- wrap-up worth waiting for — HR can be cut immediately. The standard
     -- TRANSITION_GAP_SECONDS (5s) gap still applies via last_disable_time
     -- before the next plugin enables.
-    WarPlans_QST_Helltide_TorturedGifts = 'HelltideRevampedPlugin',
+    --
+    -- arrived_when = has_helltide_buff: when the player is already inside the
+    -- helltide zone (cold-start with both plugins enabled, or post-respawn
+    -- re-arm), warplan.teleport_to_activity() is a no-op and the orchestrator
+    -- otherwise loops on "teleport retry — world/zone unchanged" while HR
+    -- tries to do its job (logzewx 3337-3343 confirmed). The buff check is the
+    -- ground truth — it fires when we're in the active helltide regardless of
+    -- which specific Helltide_* zone we landed in.
+    WarPlans_QST_Helltide_TorturedGifts = {
+        plugin       = 'HelltideRevampedPlugin',
+        arrived_when = has_helltide_buff,
+    },
 
     WarPlans_QST_Undercity = {
         plugin       = 'WonderCityPlugin',
