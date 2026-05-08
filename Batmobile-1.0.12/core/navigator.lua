@@ -1187,6 +1187,14 @@ navigator.move = function ()
                         if not navigator.paused then navigator.update() end
                         player_pos = local_player:get_position()
                         cur_node = utils.normalize_node(player_pos)
+                        -- Host-side position update can lag the dash/teleport by a tick
+                        -- or two. Without this, the next find_path runs from the pre-cast
+                        -- position and either returns a path that backtracks or fails
+                        -- outright. Overriding last_pos to the spell destination + a
+                        -- short replan cooldown keeps subsequent pathfinds anchored
+                        -- where we actually are.
+                        navigator.last_pos = utils.normalize_node(spell_node)
+                        navigator.pathfind_replan_cooldown = get_time_since_inject() + 0.3
                         navigator.path = new_path
                         local node_str = utils.vec_to_string(spell_node)
                         navigator.blacklisted_spell_node[node_str] = spell_node

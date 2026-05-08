@@ -132,6 +132,24 @@ local patrol_stuck_pos = nil
 local patrol_free_explore = false
 local patrol_free_explore_start = nil -- time when we entered free-explore mode
 
+-- Patrol unreachable-waypoint detection (mirrors the chest-unreachability fix).
+-- Two signals make a waypoint "unreachable" without waiting on the 5s stuck timer:
+--   1) BatmobilePlugin.set_target returns false → waypoint sits in the failed_target
+--      cooldown zone (25u radius from a previous partial-path no-progress give-up).
+--   2) get_last_pathfind keeps returning plen<=2 limit_partial against this waypoint
+--      → A* can't get within ~1m of it in its time budget (cliff/wall, no traversal).
+-- Both signals advance ni by WAYPOINT_LOOKAHEAD; after PATROL_SKIP_TO_FREE_EXPLORE
+-- consecutive skips we drop into FREE_EXPLORE so Batmobile's frontier explorer
+-- (the same code path that makes ArkhamAsylum smooth) takes over.
+local PATROL_MICROPARTIAL_THRESHOLD = 20 -- consecutive plen<=2 limit_partial pathfinds
+local PATROL_MICROPARTIAL_PLEN_MAX  = 2
+local PATROL_MICROPARTIAL_GOAL_TOL  = 3  -- meters: covers the ±1.5 randomize_waypoint jitter
+local PATROL_SKIP_TO_FREE_EXPLORE   = 3  -- consecutive unreachable waypoints before falling back
+local _patrol_micropartial_count   = 0
+local _patrol_micropartial_last_id = 0
+local _patrol_micropartial_ni      = nil
+local _patrol_skip_count           = 0   -- consecutive ni skips this stuck-cluster
+
 local CHEST_INTERACT_COOLDOWN  = 4.0   -- seconds between interact_object calls on the same chest
 local last_chest_interact_time = -math.huge -- ensures first interact fires immediately
 
@@ -217,13 +235,19 @@ local function move_to(target, disable_spell)
     end
 end
 
+-- Returns true if the target was accepted by Batmobile, false if rejected
+-- (waypoint sits inside Batmobile's failed_target cooldown zone). Callers
+-- use the return value to advance ni / fall back to free-explore instead of
+-- pinning patrol on an unreachable waypoint.
 local function patrol_move(waypoint)
     if BatmobilePlugin then
         BatmobilePlugin.resume(plugin_label)
-        BatmobilePlugin.set_target(plugin_label, waypoint, false)
+        local accepted = BatmobilePlugin.set_target(plugin_label, waypoint, false)
         bm_pulse(true)
+        return accepted ~= false
     else
         pathfinder.request_move(waypoint)
+        return true
     end
 end
 
@@ -1709,6 +1733,10 @@ local helltide_task = {
             patrol_free_explore = false
             patrol_stuck_time = nil
             patrol_stuck_pos = nil
+            _patrol_skip_count = 0
+            _patrol_micropartial_count   = 0
+            _patrol_micropartial_last_id = 0
+            _patrol_micropartial_ni      = nil
             self._last_check_events_time = nil
             invalidate_fct_cache()
             return
@@ -1795,6 +1823,12 @@ local helltide_task = {
                 patrol_stuck_pos = nil
                 patrol_free_explore_start = nil
                 last_target_ni = nil -- force re-snap
+                -- Made it out of the dead cluster — reset skip streak so a
+                -- single later rejection doesn't re-trigger free-explore.
+                _patrol_skip_count = 0
+                _patrol_micropartial_count = 0
+                _patrol_micropartial_last_id = 0
+                _patrol_micropartial_ni = nil
             end
             return
         end
@@ -1819,6 +1853,11 @@ local helltide_task = {
             console.print(string.format("[PATROL] Arrived (dist=%.1f < %d), advancing ni %d -> %d", dist_to_target, WAYPOINT_ARRIVAL_DIST, old_ni, ni))
             patrol_stuck_time = nil
             patrol_stuck_pos = nil
+            -- Genuine progress: clear unreachable-waypoint streak counters.
+            _patrol_skip_count = 0
+            _patrol_micropartial_count = 0
+            _patrol_micropartial_last_id = 0
+            _patrol_micropartial_ni = nil
         end
 
         -- If target waypoint is too far, re-snap to nearest
@@ -1859,15 +1898,100 @@ local helltide_task = {
             end
         end
 
+        -- Local helper: advance ni by WAYPOINT_LOOKAHEAD and reset per-waypoint
+        -- detection state. Used by both unreachable-detection paths below.
+        local function advance_ni(reason)
+            local old_ni = ni
+            ni = ni + WAYPOINT_LOOKAHEAD
+            if ni > total then ni = 1 end
+            console.print(string.format("[PATROL] %s — advancing ni %d -> %d (skip #%d)",
+                reason, old_ni, ni, _patrol_skip_count))
+            last_target_ni = nil  -- force fresh set_target on next tick
+            _patrol_micropartial_count = 0
+            _patrol_micropartial_last_id = 0
+            _patrol_micropartial_ni = nil
+        end
+
+        local function fallback_to_free_explore(reason)
+            console.print(string.format("[PATROL] %s — switching to FREE_EXPLORE", reason))
+            _patrol_skip_count = 0
+            _patrol_micropartial_count = 0
+            _patrol_micropartial_last_id = 0
+            _patrol_micropartial_ni = nil
+            if BatmobilePlugin then
+                BatmobilePlugin.reset_movement(plugin_label)
+            end
+            patrol_free_explore = true
+            patrol_free_explore_start = now
+            last_target_ni = nil
+        end
+
         -- Send target to Batmobile only when ni changes
         if ni ~= last_target_ni then
             local wp = tracker.waypoints[ni]
             console.print(string.format("[PATROL] New target ni=%d dist=%.1f pos=(%.1f,%.1f,%.1f)", ni, utils.distance_to(wp), wp:x(), wp:y(), wp:z()))
             last_target_ni = ni
-            patrol_move(randomize_waypoint(wp))
+            local accepted = patrol_move(randomize_waypoint(wp))
+            if not accepted then
+                -- Waypoint sits in Batmobile's failed_target zone (25u from a
+                -- previous partial-path give-up). Skip ahead; if multiple
+                -- consecutive waypoints are blocked we're inside the dead
+                -- cluster — let Batmobile's frontier explorer find a way out.
+                _patrol_skip_count = _patrol_skip_count + 1
+                if _patrol_skip_count >= PATROL_SKIP_TO_FREE_EXPLORE then
+                    fallback_to_free_explore(string.format(
+                        "%d consecutive waypoint rejections", _patrol_skip_count))
+                else
+                    advance_ni("set_target rejected (failed_target zone)")
+                end
+                return
+            end
+            _patrol_skip_count = 0
+            _patrol_micropartial_count = 0
+            _patrol_micropartial_last_id = 0
+            _patrol_micropartial_ni = ni
         else
             -- Same target, keep moving
             local wp = tracker.waypoints[ni]
+
+            -- Micro-partial detector (mirrors remembered-chest unreachability):
+            -- A* repeatedly returning a 2-node limit_partial against this waypoint
+            -- means it sits behind unwalkable terrain with no traversal in range.
+            -- Skip ahead immediately rather than waiting for the 5s stuck timer.
+            if BatmobilePlugin and BatmobilePlugin.get_last_pathfind then
+                local pf = BatmobilePlugin.get_last_pathfind()
+                if pf and pf.call_id ~= _patrol_micropartial_last_id then
+                    _patrol_micropartial_last_id = pf.call_id
+                    if _patrol_micropartial_ni ~= ni then
+                        _patrol_micropartial_ni    = ni
+                        _patrol_micropartial_count = 0
+                    end
+                    local goal_match = math.abs(pf.goal_x - wp:x()) < PATROL_MICROPARTIAL_GOAL_TOL
+                                       and math.abs(pf.goal_y - wp:y()) < PATROL_MICROPARTIAL_GOAL_TOL
+                    if goal_match
+                       and pf.status == "limit_partial"
+                       and pf.plen <= PATROL_MICROPARTIAL_PLEN_MAX
+                    then
+                        _patrol_micropartial_count = _patrol_micropartial_count + 1
+                        if _patrol_micropartial_count >= PATROL_MICROPARTIAL_THRESHOLD then
+                            console.print(string.format(
+                                "[PATROL] ni=%d unreachable (%d consecutive plen<=%d limit_partial pathfinds)",
+                                ni, _patrol_micropartial_count, PATROL_MICROPARTIAL_PLEN_MAX))
+                            _patrol_skip_count = _patrol_skip_count + 1
+                            if _patrol_skip_count >= PATROL_SKIP_TO_FREE_EXPLORE then
+                                fallback_to_free_explore(string.format(
+                                    "%d consecutive unreachable waypoints", _patrol_skip_count))
+                            else
+                                advance_ni("micro-partial pathfinds")
+                            end
+                            return
+                        end
+                    else
+                        _patrol_micropartial_count = 0
+                    end
+                end
+            end
+
             if not self._last_patrol_debug then self._last_patrol_debug = 0 end
             if now - self._last_patrol_debug > 2 then
                 self._last_patrol_debug = now
