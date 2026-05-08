@@ -43,6 +43,25 @@ local DIAG_INTERVAL = 4.0  -- seconds between "NPC not found" diagnostic dumps
 local function log(msg) console.print('[WarPigs:turn_in] ' .. msg) end
 local function now() return get_time_since_inject() end
 
+-- Returns true when Alfred has no pending work. Mirrors orchestrator's
+-- alfred_idle() — we gate the turn-in here so we never teleport to Temis
+-- while Alfred is mid-stash/salvage (that teleport would cancel Alfred's
+-- return portal and cause item loss).
+local function alfred_idle()
+    local alfred = _G.AlfredTheButlerPlugin
+    if not alfred or type(alfred.get_status) ~= 'function' then return true end
+    local ok, s = pcall(alfred.get_status)
+    if not ok or type(s) ~= 'table' then return true end
+    if not s.enabled then return true end
+    if s.paused then
+        if s.need_trigger or s.inventory_full then return false end
+        return true
+    end
+    if s.trigger_tasks then return false end
+    return true
+end
+local alfred_wait_logged = false
+
 local function set_state(s)
     if s ~= state then
         log('state ' .. state .. ' -> ' .. s)
@@ -122,10 +141,24 @@ function M.tick(active)
             set_state(STATE.IDLE)
         end
         stuck_not_in_town_since = nil
+        alfred_wait_logged      = false
         return
     end
 
     if state == STATE.IDLE then
+        -- Hold until Alfred has finished any pending stash/salvage work.
+        -- Teleporting to Temis while Alfred is mid-run (trigger_tasks active
+        -- or paused-with-work) cancels Alfred's return portal and causes
+        -- item loss — items in transit never land back in inventory.
+        if not alfred_idle() then
+            if not alfred_wait_logged then
+                log('waiting — Alfred busy (stash/salvage in progress)')
+                alfred_wait_logged = true
+            end
+            return
+        end
+        alfred_wait_logged = false
+
         if get_zone() == TEMIS_ZONE then
             log('Already in Temis — approaching Tyrael.')
             set_state(STATE.APPROACH_NPC)

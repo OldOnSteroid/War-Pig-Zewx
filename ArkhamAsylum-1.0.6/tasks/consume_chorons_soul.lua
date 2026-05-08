@@ -13,10 +13,11 @@ local settings = require 'core.settings'
 --   to MAX_CLICKS, or until the actor goes non-interactable (game-side cap).
 local SOUL_ACTOR_NAME = 'Warplans_Pit_ChoronsSoul'
 local INTERACT_RANGE  = 3      -- distance considered "at the soul" (matches shrine)
+local PRE_WALK_LOOT_DELAY = 10.0 -- hold at player position when soul first appears so Looteer can sweep boss-drop loot before we leave for the soul
 local LOOT_DELAY      = 4.0    -- park at soul before first click so Looteer sweeps drops
 local CHARGE_DELAY    = 4.5    -- per-click channel — 10 × 4.5 ≈ 45s as observed
 local MAX_CLICKS      = 10     -- safety cap; soul typically goes non-interactable first
-local WALK_TIMEOUT    = 30.0   -- give up reaching this soul after this long without arriving
+local WALK_TIMEOUT    = 30.0   -- give up reaching this soul after this long without arriving (measured from end of pre-walk delay)
 
 -- Post-consume orb sweep: after the soul is exhausted, the experience orbs
 -- it dropped sit on the ground around the soul actor.  XP orbs auto-pickup
@@ -29,13 +30,14 @@ local ORB_SWEEP_PER_PT_TIMEOUT = 2.5  -- give up on a single point after this lo
 local ORB_SWEEP_TOTAL_TIMEOUT  = 12.0 -- hard cap on the whole sweep
 
 local status_enum = {
-    IDLE       = 'idle',
-    WALKING    = "walking to Choron's Soul",
-    LOOT_DELAY = "waiting at Choron's Soul (loot window)",
-    CLICKING   = "clicking Choron's Soul",
-    CHARGING   = "Choron's Soul charging",
-    ORB_SWEEP  = "collecting XP orbs around Choron's Soul",
-    DONE       = "Choron's Soul consumed",
+    IDLE           = 'idle',
+    PRE_LOOT_DELAY = "holding for boss-drop loot before walking to Choron's Soul",
+    WALKING        = "walking to Choron's Soul",
+    LOOT_DELAY     = "waiting at Choron's Soul (loot window)",
+    CLICKING       = "clicking Choron's Soul",
+    CHARGING       = "Choron's Soul charging",
+    ORB_SWEEP      = "collecting XP orbs around Choron's Soul",
+    DONE           = "Choron's Soul consumed",
 }
 
 local task = {
@@ -50,7 +52,8 @@ local active_soul_key = nil
 local arrived_time    = nil
 local last_click_time = nil    -- nil before first click; set after each interact_object
 local click_count     = 0
-local first_seen_time = nil    -- when we first started tracking this soul (walk timeout)
+local first_seen_time = nil    -- when we first started tracking this soul (drives pre-walk loot delay)
+local walk_phase_started = nil -- when the pre-walk delay elapsed and walking actually began (drives WALK_TIMEOUT)
 local skipped_souls   = {}     -- hard-skip on truly broken souls (walk timeout exhausted)
 -- Orb-sweep state.  `orb_sweep_points` is the sequence of vec3 ring points
 -- around the soul's last-known position; `orb_sweep_idx` advances when we
@@ -74,6 +77,7 @@ local function reset_soul_state()
     last_click_time      = nil
     click_count          = 0
     first_seen_time      = nil
+    walk_phase_started   = nil
     orb_sweep_points     = nil
     orb_sweep_idx        = 1
     orb_sweep_start_time = nil
@@ -220,7 +224,8 @@ task.Execute = function()
     if active_soul_key ~= key then
         if active_soul_key == nil then
             console.print("[consume_chorons_soul] soul detected at " .. tostring(key) ..
-                " — engaging (loot delay=" .. LOOT_DELAY .. "s, " ..
+                " — pre-walk loot delay=" .. PRE_WALK_LOOT_DELAY .. "s, then engage " ..
+                "(soul loot delay=" .. LOOT_DELAY .. "s, " ..
                 MAX_CLICKS .. " clicks × " .. CHARGE_DELAY .. "s charge)")
         else
             console.print("[consume_chorons_soul] new soul detected (" .. tostring(key) ..
@@ -234,6 +239,27 @@ task.Execute = function()
     local now  = get_time_since_inject()
     local dist = utils.distance(local_player, soul)
 
+    -- Pre-walk loot window: the boss died moments before the soul spawned, so
+    -- loot is on the ground at the player's current position. Hold here for
+    -- PRE_WALK_LOOT_DELAY so Looteer can sweep boss drops before we leave.
+    -- pause + clear_target every frame guarantees nothing (this task on later
+    -- ticks, lower-priority tasks if priority ever inverts, stale custom
+    -- targets) can re-issue movement during the window.
+    if first_seen_time and (now - first_seen_time) < PRE_WALK_LOOT_DELAY then
+        BatmobilePlugin.clear_target(plugin_label)
+        task.status = status_enum['PRE_LOOT_DELAY']
+        return
+    end
+
+    -- Pre-walk delay elapsed — first frame stamps walk_phase_started so
+    -- WALK_TIMEOUT is measured from when walking actually began.
+    if walk_phase_started == nil then
+        walk_phase_started = now
+        console.print(string.format(
+            "[consume_chorons_soul] pre-walk loot delay (%.1fs) elapsed — walking to soul (dist=%.1f)",
+            PRE_WALK_LOOT_DELAY, dist))
+    end
+
     -- Walk phase
     if dist > INTERACT_RANGE then
         local disable_spell = (dist <= 4)
@@ -244,7 +270,7 @@ task.Execute = function()
         -- actually arrived (not from a previous brief touch we walked away from).
         arrived_time = nil
         -- Walk timeout: if we can never reach this soul, blacklist and move on
-        if first_seen_time and (now - first_seen_time) > WALK_TIMEOUT then
+        if walk_phase_started and (now - walk_phase_started) > WALK_TIMEOUT then
             console.print("[consume_chorons_soul] walk timeout (" .. WALK_TIMEOUT ..
                 "s) for soul " .. tostring(key) .. " — blacklisting")
             skipped_souls[key] = true
@@ -303,7 +329,7 @@ task.Execute = function()
     end
 
     -- Fire the click
-    orbwalker.set_clear_toggle(false)
+    settings.orb_set_clear(false)
     interact_object(soul)
     click_count     = click_count + 1
     last_click_time = now

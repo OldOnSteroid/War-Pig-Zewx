@@ -389,9 +389,9 @@ task.Execute = function ()
                 break
             end
         end
-        orbwalker.set_clear_toggle(has_notable)
+        settings.orb_set_clear(has_notable)
     else
-        orbwalker.set_clear_toggle(true)
+        settings.orb_set_clear(true)
     end
 
     -- Pick movement target

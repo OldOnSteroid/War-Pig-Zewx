@@ -66,7 +66,7 @@ task.Execute = function ()
                 task.interact_time = get_time_since_inject()
             end
             if enticement:is_interactable() then
-                orbwalker.set_clear_toggle(false)
+                settings.orb_set_clear(false)
                 -- Debounce: don't refire interact_object every tick. The
                 -- beacon ignite animation needs the previous call to
                 -- complete or the player just stutters in cast.
@@ -78,7 +78,7 @@ task.Execute = function ()
                 end
                 task.status = status_enum['INTERACTING']
             else
-                orbwalker.set_clear_toggle(true)
+                settings.orb_set_clear(true)
                 local remaining = task.interact_time + timeout - get_time_since_inject()
                 local timer = string.format('%.2f', remaining) .. 's'
                 task.status = status_enum['WAITING'] .. timer

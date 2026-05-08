@@ -4,6 +4,19 @@ local tracker = require 'core.tracker'
 
 local pathfinder = {}
 
+-- Monotonic counter + last-result snapshot, exposed via external.get_last_pathfind.
+-- External callers (e.g. HR's remembered-chest stuck detector) use call_id to
+-- detect new pathfind results without polling navigator.path (which gets cleared
+-- between observations).
+pathfinder.pf_call_id = 0
+pathfinder.last_pathfind = {
+    call_id = 0,
+    status  = nil,
+    plen    = 0,
+    goal_x  = 0,
+    goal_y  = 0,
+}
+
 -- Pre-computed constant
 local SQRT2_MINUS1 = math.sqrt(2) - 1
 
@@ -339,6 +352,13 @@ pathfinder.find_path = function (start, goal, is_custom_target, shared_evaluated
         tracker.bench_count("pf_" .. pf_bucket(counter))
         tracker.bench_count("pf_status_" .. status)
         tracker.bench_stop("find_path", meta)
+        pathfinder.pf_call_id = pathfinder.pf_call_id + 1
+        local last = pathfinder.last_pathfind
+        last.call_id = pathfinder.pf_call_id
+        last.status  = status
+        last.plen    = #path
+        last.goal_x  = goal_node:x()
+        last.goal_y  = goal_node:y()
         return path, is_partial
     end
 

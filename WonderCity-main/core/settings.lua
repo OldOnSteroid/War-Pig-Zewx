@@ -52,6 +52,7 @@ local settings = {
     inventory_cell_size_y = 50,
     portal_button_x = 960,
     portal_button_y = 540,
+    manage_orbwalker = false,
 }
 
 settings.get_keybind_state = function ()
@@ -123,6 +124,19 @@ settings.update_settings = function ()
     settings.inventory_cell_size_y = gui.elements.inventory_cell_size_y:get()
     settings.portal_button_x = gui.elements.portal_button_x:get()
     settings.portal_button_y = gui.elements.portal_button_y:get()
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
+end
+
+settings.orb_set_clear = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_clear_toggle(v)
+    end
+end
+
+settings.orb_set_block = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_block_movement(v)
+    end
 end
 
 return settings

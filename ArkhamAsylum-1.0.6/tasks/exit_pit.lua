@@ -75,7 +75,7 @@ task.Execute = function ()
     end
     BatmobilePlugin.clear_target(plugin_label)
     BatmobilePlugin.pause(plugin_label)
-    orbwalker.set_clear_toggle(true)
+    settings.orb_set_clear(true)
     if tracker.exit_trigger_time == nil then
         tracker.exit_trigger_time = get_time_since_inject()
     end

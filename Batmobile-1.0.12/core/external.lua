@@ -5,6 +5,7 @@ local explorer   = require 'core.explorer'
 local tracker    = require 'core.tracker'
 local utils      = require 'core.utils'
 local long_path  = require 'core.long_path'
+local pathfinder = require 'core.pathfinder'
 
 local external = {
     name          = plugin_label
@@ -215,6 +216,15 @@ end
 -- Returns the navigator's current path (array of vec3, may be empty).
 external.get_path = function()
     return navigator.path
+end
+
+-- Returns a snapshot of the most recent find_path call:
+--   { call_id, status, plen, goal_x, goal_y }
+-- call_id is monotonic — callers can detect "is this a new pathfind since I
+-- last looked?" by comparing against a remembered id. Used by HR's remembered-
+-- chest micro-partial detector to spot consistent A* failure on the same goal.
+external.get_last_pathfind = function()
+    return pathfinder.last_pathfind
 end
 
 -- Clear the traversal blacklist and failed-target state so previously crossed

@@ -71,7 +71,7 @@ task.Execute = function ()
         else
             BatmobilePlugin.clear_target(plugin_label)
             task.status = status_enum['WALKING']
-            orbwalker.set_clear_toggle(false)
+            settings.orb_set_clear(false)
             interact_object(shrine)
             -- timeout: if shrine refuses to interact after INTERACT_TIMEOUT seconds, blacklist it
             if stuck_since == nil then

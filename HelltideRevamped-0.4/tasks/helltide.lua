@@ -29,15 +29,36 @@ local chest_temp_blacklist = {}                    -- key -> expiry timestamp
 local CHEST_BLACKLIST_DURATION   = 60.0            -- seconds to skip a stuck chest
 local CHEST_STUCK_WINDOW         = 12.0            -- no progress for this long = stuck
 local CHEST_STUCK_PROGRESS       = 4.0             -- meters of distance reduction = "progress"
-local CHEST_STUCK_RANGE          = 35.0            -- only stuck-detect when this close
+local CHEST_STUCK_RANGE          = 60.0            -- only stuck-detect when this close
+                                                   -- (raised 35→60: 41u-away chest behind a ledge
+                                                   -- oscillated indefinitely without entering the
+                                                   -- 35u radius — the no-progress test is the real
+                                                   -- "stuck on geometry" signal, distance gate just
+                                                   -- needs to be wide enough to catch ledge cases)
+-- Micro-partial detector: when the pathfinder repeatedly returns a 2-node
+-- limit_partial for the same chest target, A* couldn't get close to the goal
+-- in its time budget — almost always means the target is on the other side
+-- of an unwalkable boundary (cliff/wall) with no traversal nearby. Faster
+-- than the 12s no-progress detector for this specific failure mode.
+local CHEST_MICROPARTIAL_THRESHOLD = 20            -- consecutive bad pathfinds before blacklist
+local CHEST_MICROPARTIAL_PLEN_MAX  = 2             -- plen at or below this counts as "bad"
+-- Once we're physically at the chest, we're channeling, not "stuck on geometry".
+-- Suppress the no-progress / micro-partial blacklisters in this radius so a
+-- monster interrupting the open animation doesn't wipe a reachable chest.
+local CHEST_INTERACT_RANGE         = 6             -- meters: treat as "in interaction"
 local _chest_stuck_key  = nil
 local _chest_stuck_t    = 0
 local _chest_stuck_dist = math.huge
+-- Micro-partial counter state (per-chest)
+local _chest_micropartial_count   = 0
+local _chest_micropartial_last_id = 0
 
 local function chest_stuck_reset()
     _chest_stuck_key  = nil
     _chest_stuck_t    = 0
     _chest_stuck_dist = math.huge
+    _chest_micropartial_count   = 0
+    _chest_micropartial_last_id = 0
 end
 
 -- Farm-chest state: when a nearby chest needs <50 more cinders we stay in its 30-unit
@@ -1097,6 +1118,7 @@ local function check_events(self)
             remembered_chest_target = rkey
             remembered_chest_long_path_started = false
             remembered_chest_long_path_ok = false
+            chest_stuck_reset()
             self.current_state = helltide_state.MOVING_TO_REMEMBERED_CHEST
             return
         end
@@ -1275,6 +1297,8 @@ local helltide_task = {
     current_state = helltide_state.INIT,
 
     shouldExecute = function()
+        -- Explicitly excluded zones: let search_helltide teleport us away instead.
+        if zone_overrides.is_excluded_zone() then return false end
         -- Also keep running when we've wandered out but helltide is still active.
         -- Zone-override case (WarPigs auto-TP into a non-canonical zone): take
         -- ownership during the helltide hour even before the buff lands so we
@@ -2048,7 +2072,7 @@ local helltide_task = {
         end
 
         if km_target then
-            orbwalker.set_clear_toggle(true)
+            settings.orb_set_clear(true)
             local cur_dist = utils.distance_to(km_target)
             if cur_dist > 2 then
                 if BatmobilePlugin then
@@ -2167,6 +2191,11 @@ local helltide_task = {
         local hkey  = chest_key(found_chest, found_chest_position)
         if _chest_stuck_key ~= hkey then
             _chest_stuck_key  = hkey
+            _chest_stuck_t    = now_t
+            _chest_stuck_dist = dist_to_saved
+        elseif dist_to_saved <= CHEST_INTERACT_RANGE then
+            -- At the chest — channeling, not stuck. Refresh the window so
+            -- monster-interrupted opens don't blacklist a reachable chest.
             _chest_stuck_t    = now_t
             _chest_stuck_dist = dist_to_saved
         elseif dist_to_saved <= _chest_stuck_dist - CHEST_STUCK_PROGRESS then
@@ -2307,6 +2336,16 @@ local helltide_task = {
             _chest_stuck_key  = remembered_chest_target
             _chest_stuck_t    = now_t
             _chest_stuck_dist = dist
+            _chest_micropartial_count   = 0
+            _chest_micropartial_last_id = 0
+        elseif dist <= CHEST_INTERACT_RANGE then
+            -- At the chest — channeling, not stuck. Refresh the window so
+            -- monster-interrupted opens don't blacklist a reachable chest.
+            -- Also clear the micro-partial counter (no pathfinding happens
+            -- at this range, but be defensive against stale counts).
+            _chest_stuck_t            = now_t
+            _chest_stuck_dist         = dist
+            _chest_micropartial_count = 0
         elseif dist <= _chest_stuck_dist - CHEST_STUCK_PROGRESS then
             -- Made meaningful progress; reset the window.
             _chest_stuck_t    = now_t
@@ -2325,6 +2364,41 @@ local helltide_task = {
             chest_stuck_reset()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
+        end
+
+        -- Micro-partial detector: pathfinder consistently returning a 2-node
+        -- limit_partial for this chest goal means A* couldn't get close in its
+        -- time budget — almost always a cliff/wall with no traversal nearby.
+        -- Catches the failure ~1.5s before the 12s no-progress timer fires.
+        if has_batmobile and BatmobilePlugin.get_last_pathfind then
+            local pf = BatmobilePlugin.get_last_pathfind()
+            if pf and pf.call_id ~= _chest_micropartial_last_id then
+                _chest_micropartial_last_id = pf.call_id
+                local goal_match = math.abs(pf.goal_x - entry.position:x()) < 3
+                                   and math.abs(pf.goal_y - entry.position:y()) < 3
+                if goal_match
+                   and pf.status == "limit_partial"
+                   and pf.plen <= CHEST_MICROPARTIAL_PLEN_MAX
+                then
+                    _chest_micropartial_count = _chest_micropartial_count + 1
+                    if _chest_micropartial_count >= CHEST_MICROPARTIAL_THRESHOLD then
+                        console.print(string.format(
+                            "[CHEST RECALL] %s unreachable (%d consecutive plen<=%d limit_partial pathfinds, dist=%.1f) — blacklisting %.0fs and resuming patrol",
+                            entry.name, _chest_micropartial_count, CHEST_MICROPARTIAL_PLEN_MAX, dist, CHEST_BLACKLIST_DURATION))
+                        chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                        if has_batmobile and BatmobilePlugin.stop_long_path then
+                            BatmobilePlugin.stop_long_path(plugin_label)
+                        end
+                        clear_movement()
+                        remembered_chest_target = nil
+                        chest_stuck_reset()
+                        self.current_state = helltide_state.EXPLORE_HELLTIDE
+                        return
+                    end
+                else
+                    _chest_micropartial_count = 0
+                end
+            end
         end
 
         -- Give up if chest has drifted beyond the max range (player moved away during navigation)
@@ -2364,19 +2438,38 @@ local helltide_task = {
             end
 
             local chest = find_closest_target(entry.name)
-            if chest and chest:is_interactable() then
-                local chest_dist = utils.distance_to(chest)
-
-                if chest_dist <= 2 then
-                    console.print(string.format("[CHEST RECALL] Opening remembered %s", entry.name))
-                    interact_object(chest)
+            if chest then
+                -- Chest exists but is no longer interactable — open succeeded.
+                -- Only now is it safe to drop the remembered entry; previously
+                -- we wiped on the first interact_object call, which lost the
+                -- chest whenever a monster interrupted the channel.
+                if not chest:is_interactable() then
+                    console.print(string.format("[CHEST RECALL] %s opened (no longer interactable) — holding %.1fs for loot", entry.name, CHEST_POST_OPEN_PAUSE))
                     mark_chest_opened()
                     if settings.experimental_explorer then
                         helltide_explorer.mark_chest_opened(chest:get_position())
                     end
                     remembered_chests[remembered_chest_target] = nil
                     remembered_chest_target = nil
-                    clear_movement()
+                    last_chest_interact_time = -math.huge
+                    tracker.clear_key("remembered_chest_timeout")
+                    self.current_state = helltide_state.EXPLORE_HELLTIDE
+                    return
+                end
+
+                local chest_dist = utils.distance_to(chest)
+                if chest_dist <= 2 then
+                    -- Throttled interact — same pattern as move_to_helltide_chest.
+                    -- Stay in MOVING_TO_REMEMBERED_CHEST until the chest goes
+                    -- non-interactable (handled above) so a monster-interrupted
+                    -- channel just retries instead of giving up the entry.
+                    local now = get_time_since_inject()
+                    if now - last_chest_interact_time >= CHEST_INTERACT_COOLDOWN then
+                        last_chest_interact_time = now
+                        console.print(string.format("[CHEST RECALL] Opening remembered %s", entry.name))
+                        interact_object(chest)
+                        mark_chest_opened()
+                    end
                     return
                 elseif chest_dist <= 6 then
                     move_to(chest, chest_dist <= 4)
@@ -2502,7 +2595,7 @@ local helltide_task = {
         end
 
         -- Inside circle: kill monsters, or free-roam to find them
-        orbwalker.set_clear_toggle(true)
+        settings.orb_set_clear(true)
         local km_target = get_kill_target()
         if km_target then
             local cur_dist = utils.distance_to(km_target)
@@ -2605,7 +2698,7 @@ local helltide_task = {
     end,
 
     kill_monsters = function(self)
-        orbwalker.set_clear_toggle(true)
+        settings.orb_set_clear(true)
         local local_player = get_local_player()
         if not local_player then
             self.current_state = helltide_state.EXPLORE_HELLTIDE

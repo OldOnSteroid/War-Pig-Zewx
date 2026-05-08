@@ -21,6 +21,7 @@ local settings = {
     farm_cinder_threshold = 0,
     do_maiden = false,
     maiden_disable_cinders = 0,
+    manage_orbwalker = false,
 }
 
 function settings:update_settings()
@@ -44,6 +45,19 @@ function settings:update_settings()
     settings.farm_cinder_threshold = gui.elements.farm_cinder_threshold:get()
     settings.do_maiden = gui.elements.do_maiden_toggle:get()
     settings.maiden_disable_cinders = gui.elements.maiden_disable_cinders:get()
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
+end
+
+settings.orb_set_clear = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_clear_toggle(v)
+    end
+end
+
+settings.orb_set_block = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_block_movement(v)
+    end
 end
 
 return settings

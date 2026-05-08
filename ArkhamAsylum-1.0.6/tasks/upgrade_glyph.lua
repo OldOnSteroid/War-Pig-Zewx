@@ -127,7 +127,7 @@ task.Execute = function ()
     local gizmo = utils.get_glyph_upgrade_gizmo()
     local glyphs = get_glyphs()
     if settings.disable_orbwalker_at_glyphstone and tracker.boss_dead and gizmo ~= nil and utils.distance(local_player, gizmo) <= 5 then
-        orbwalker.set_clear_toggle(false)
+        settings.orb_set_clear(false)
     end
     if gizmo ~= nil and utils.distance(local_player, gizmo) > 2 then
         local disable_spell = false

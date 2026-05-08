@@ -73,6 +73,8 @@ gui.elements = {
     belial_target_boss   = cbo(0,    "bel_target"),
     belial_party_delay   = si(0, 5000, 0, "bel_delay"),
     belial_pool          = {},
+
+    manage_orbwalker = cb(false, "manage_orbwalker"),
 }
 
 for _, bd in ipairs(enums.belial_chest_bosses) do
@@ -125,6 +127,9 @@ function gui.render()
             "Farm bosses using consumable summoning materials (Shards of Agony, Living Steel, etc.)")
         gui.elements.run_sigils:render("Run Lair Boss Sigils",
             "Farm bosses using Bloodied and Bloodsoaked Lair Boss Sigils from your dungeon key inventory.")
+
+        gui.elements.manage_orbwalker:render("Manage orbwalker",
+            "When enabled, this script will toggle orbwalker clear/block-movement around boss kills and altar interaction. Off by default — leaves orbwalker fully under your rotation's control.")
 
         gui.elements.misc_tree:pop()
     end

@@ -110,8 +110,8 @@ task.Execute = function ()
     local local_player = get_local_player()
     if not local_player then return end
     local player_pos = get_player_position()
-    orbwalker.set_clear_toggle(true)
-    orbwalker.set_block_movement(true)
+    settings.orb_set_clear(true)
+    settings.orb_set_block(true)
 
     -- Boss is alive / mid-fight: kill_boss owns movement. Defense in depth —
     -- kill_boss is higher priority so we shouldn't reach here, but if it does

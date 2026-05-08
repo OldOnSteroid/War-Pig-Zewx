@@ -31,6 +31,8 @@ local settings = {
     },
 
     _belial_current_target = nil,
+
+    manage_orbwalker = false,
 }
 
 function settings:update_settings()
@@ -69,6 +71,20 @@ function settings:update_settings()
     end
     settings.belial_chest.pool        = pool
     settings.belial_chest.party_delay = gui.elements.belial_party_delay:get()
+
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
+end
+
+settings.orb_set_clear = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_clear_toggle(v)
+    end
+end
+
+settings.orb_set_block = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_block_movement(v)
+    end
 end
 
 return settings

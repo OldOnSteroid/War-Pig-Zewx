@@ -83,6 +83,7 @@ gui.elements = {
     use_magoogle_tool = create_checkbox(false, 'use_magoogle_tool'),
     follower_explore = create_checkbox(false, 'follower_explore'),
     disable_orbwalker_at_glyphstone = create_checkbox(false, 'disable_orbwalker_at_glyphstone'),
+    manage_orbwalker = create_checkbox(false, 'manage_orbwalker'),
     use_long_path = create_checkbox(false, 'use_long_path'),
     speed_mode = create_checkbox(false, 'speed_mode'),
     push_mode = create_checkbox(false, 'push_mode'),
@@ -92,6 +93,7 @@ gui.elements = {
     push_boss_weight = slider_int:new(1, 20, 10, get_hash(plugin_label .. '_' .. 'push_boss_weight')),
     push_max_pull_dist = slider_int:new(15, 80, 40, get_hash(plugin_label .. '_' .. 'push_max_pull_dist')),
     push_min_cluster_weight = slider_int:new(1, 20, 5, get_hash(plugin_label .. '_' .. 'push_min_cluster_weight')),
+    death_recovery = create_checkbox(false, 'death_recovery'),
 }
 gui.render = function ()
     if not gui.elements.main_tree:push('Z | Arkham Asylum (pit) | Leoric | v' .. gui.plugin_version) then return end
@@ -146,7 +148,13 @@ gui.render = function ()
             gui.elements.maximum_glyph_level:render('Maximum level', 'Only upgrade glyphs with level less than or equal to this value')
             gui.elements.upgrade_legendary_toggle:render('Upgrade to legendary glyph', 'Disable this to save gem fragments')
         end
-        gui.elements.disable_orbwalker_at_glyphstone:render('Disable orbwalker at glyphstone', 'When enabled, suspends orbwalker skill casts while standing within 5 units of the glyphstone after the boss dies')
+        gui.elements.manage_orbwalker:render('Manage orbwalker', 'When enabled, this script will toggle orbwalker clear/block-movement during pit tasks. Off by default — leaves orbwalker fully under your rotation\'s control.')
+        if gui.elements.manage_orbwalker:get() then
+            gui.elements.disable_orbwalker_at_glyphstone:render('Disable orbwalker at glyphstone', 'When enabled, suspends orbwalker skill casts while standing within 5 units of the glyphstone after the boss dies')
+        end
+        gui.elements.death_recovery:render('Post-death recovery (BETA)',
+            'WIP. After dying mid-pit, route back to the last-seen portal/boss/glyph/Choron\'s Soul ' ..
+            'and walk back to the remembered boss position. Disabled by default while this is being tested.')
         gui.elements.use_chorons_soul:render("Use Choron's Soul",
             "After the boss dies, interact with the Choron's Soul actor to consume " ..
             "remaining glyph upgrade chances for experience.")

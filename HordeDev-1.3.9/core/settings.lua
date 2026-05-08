@@ -40,6 +40,7 @@ local settings = {
     use_10_wave = true,
     use_bloodied = false,
     exit_mode = 0,
+    manage_orbwalker = false,
 }
 
 function settings:update_settings()
@@ -80,6 +81,7 @@ function settings:update_settings()
     settings.use_10_wave = gui.elements.use_10_wave:get()
     settings.use_bloodied = gui.elements.use_bloodied:get()
     settings.exit_mode = gui.elements.exit_mode:get()
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
 end
 
 return settings

@@ -20,6 +20,13 @@ local confirmed_helltide_tp = nil
 local IDLE_TELEPORT_DEBOUNCE_S = 6.0
 local idle_teleport_fired_time = nil
 
+-- After exhausting all helltide_tps entries with no helltide found, wait this
+-- long before starting another scan cycle.  Prevents spamming teleports for
+-- the entire helltide window when no zone has spawned yet.
+local SEARCH_CYCLE_COOLDOWN_S = 45.0
+local cycle_tp_count      = 0    -- TPs attempted in the current scan cycle
+local last_cycle_end_time = nil  -- when the last full scan completed with no result
+
 local function detect_helltide_zone()
     for _, tp in ipairs(enums.helltide_tps) do
         if utils.player_in_region(tp.region) then
@@ -53,6 +60,9 @@ local search_helltide_task = {
         -- owns the walk-to-entry handoff.  Letting search_helltide fire here
         -- would teleport us back to a known town and undo the WarPigs TP.
         if zone_overrides.get_current() then return false end
+        -- Excluded zones: helltide task refused to run here, so we own the
+        -- teleport-away even if the helltide buff is active.
+        if zone_overrides.is_excluded_zone() then return true end
         return not utils.is_in_helltide()
     end,
 
@@ -129,15 +139,19 @@ local search_helltide_task = {
                 confirmed_helltide_tp = detected
                 console.print("[HelltideRevamped] Confirmed helltide zone: " .. confirmed_helltide_tp.file)
             end
-            -- Player landed in a working helltide; clear the skip flag so
-            -- future returns to this same zone are fast.
+            -- Player landed in a working helltide; clear the skip flag and
+            -- any pending scan-cycle cooldown so future returns are fast.
             tracker.skip_cached_zone = false
+            cycle_tp_count = 0
+            last_cycle_end_time = nil
             console.print("Found helltide")
             self.current_state = search_helltide_state.FOUND_HELLTIDE
         elseif confirmed_helltide_tp and not tracker.skip_cached_zone then
             -- We know where this hour's helltide is — go back directly
             console.print("[HelltideRevamped] Returning to known helltide zone: " .. confirmed_helltide_tp.file)
             current_city_index = index_of_tp(confirmed_helltide_tp)
+            cycle_tp_count = 0
+            last_cycle_end_time = nil
             tracker.wait_in_town = nil  -- reset arrival timer so we don't use a stale one
             self.current_state = search_helltide_state.WAITING_FOR_TELEPORT
         else
@@ -146,6 +160,11 @@ local search_helltide_task = {
             if tracker.skip_cached_zone then
                 console.print("[HelltideRevamped] skip_cached_zone set — cycling through TPs to find a different helltide")
             else
+                -- After a full TP scan with no helltide found, wait before retrying.
+                local now = get_time_since_inject()
+                if last_cycle_end_time and now - last_cycle_end_time < SEARCH_CYCLE_COOLDOWN_S then
+                    return
+                end
                 console.print("Not in helltide, teleport to next town to check")
             end
             self.current_state = search_helltide_state.TELEPORTING
@@ -168,6 +187,16 @@ local search_helltide_task = {
             then
                 console.print("[HelltideRevamped] skipping abandoned zone " .. confirmed_helltide_tp.file)
                 current_city_index = (current_city_index % #enums.helltide_tps) + 1
+            end
+            -- Track how many TPs we've tried this cycle; once all are exhausted,
+            -- record the time and fall back to SEARCHING so the cooldown gate fires.
+            cycle_tp_count = cycle_tp_count + 1
+            if cycle_tp_count >= #enums.helltide_tps then
+                cycle_tp_count = 0
+                last_cycle_end_time = get_time_since_inject()
+                console.print(string.format("[HelltideRevamped] Full TP scan complete, no helltide found — cooling down %ds before retry", SEARCH_CYCLE_COOLDOWN_S))
+                self.current_state = search_helltide_state.SEARCHING_HELLTIDE
+                return
             end
             console.print("Teleporting to: " .. tostring(enums.helltide_tps[current_city_index].file))
             tracker.wait_in_town = nil
@@ -207,6 +236,8 @@ local search_helltide_task = {
     reset = function(self)
         tracker.helltide_end = false
         helltide_task:reset()
+        cycle_tp_count = 0
+        last_cycle_end_time = nil
         self.current_state = search_helltide_state.SEARCHING_HELLTIDE
     end
 }

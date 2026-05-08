@@ -100,11 +100,11 @@ task.Execute = function ()
     if tracker.boss_trigger_time ~= nil and
         tracker.boss_trigger_time + settings.boss_delay > get_time_since_inject()
     then
-        orbwalker.set_clear_toggle(false)
+        settings.orb_set_clear(false)
         task.status = status_enum['WAITING']
         return
     end
-    orbwalker.set_clear_toggle(true)
+    settings.orb_set_clear(true)
 
     if target and utils.distance(local_player, target) > 1 then
         BatmobilePlugin.set_target(plugin_label, target)

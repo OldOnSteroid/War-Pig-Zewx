@@ -82,7 +82,7 @@ end
 task.Execute = function ()
     local local_player = get_local_player()
     if not local_player then return end
-    orbwalker.set_clear_toggle(true)
+    settings.orb_set_clear(true)
     local portal = get_portal()
     local warp_pad = get_portal_warp_pad()
     local target = portal

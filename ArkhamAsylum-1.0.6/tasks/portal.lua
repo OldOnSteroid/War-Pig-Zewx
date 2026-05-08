@@ -63,21 +63,67 @@ local PORTAL_BLOCK_RADIUS = 20
 -- (world-change crossings are handled separately via portal_just_used).
 -- On respawn, long-path back toward the remembered portal until get_portal()
 -- starts seeing it again (then the regular flow takes over).
-local _last_portal_pos       = nil       -- vec3 of last interactable portal we saw
+local _last_portal_pos       = nil       -- vec3 of last interactable (descend) portal we saw on this floor
 local _last_portal_seen_t    = -math.huge
 local PORTAL_REMEMBER_TTL    = 60        -- seconds: a portal we saw recently is probably still there
+local _last_choron_pos       = nil       -- vec3 of last Choron's Soul actor seen on this floor
+local _last_choron_seen_t    = -math.huge
 local _last_player_pos       = nil       -- per-frame tracking for jump detection
 local _respawn_recovery_pos  = nil       -- vec3 we're routing back to after detected respawn
 local _respawn_recovery_t    = -math.huge
+local _respawn_recovery_kind = nil       -- 'portal'|'boss'|'glyph'|'choron'|'last_alive' (for log + arrival check)
 local _respawn_long_path_t   = -math.huge -- last time we issued a recovery long_path
 local RESPAWN_JUMP_THRESHOLD = 50         -- match Batmobile's nav.lua respawn threshold
 local RESPAWN_RECOVERY_TIMEOUT = 45       -- seconds: give up if portal not re-detected by then
 local RESPAWN_PATH_RETRY     = 3          -- seconds between recovery long_path retries
+local RESPAWN_ARRIVAL_RADIUS = 10         -- non-portal recovery clears once we're this close
+local CHORON_SOUL_ACTOR      = 'Warplans_Pit_ChoronsSoul'
+
+-- Pick a recovery target by priority: descend portal > boss > glyph > Choron's
+-- Soul > last-alive position. State for portal/choron is cleared on world
+-- change (see update_back_portal_tracking), so the chain only ever sees
+-- targets known on the current floor — entry/back portals are never picked.
+local function pick_recovery_target(now, death_pos)
+    if _last_portal_pos ~= nil
+        and (now - _last_portal_seen_t) <= PORTAL_REMEMBER_TTL
+    then
+        return _last_portal_pos, 'portal'
+    end
+    if tracker.boss_position ~= nil then
+        return tracker.boss_position, 'boss'
+    end
+    local glyph = utils.get_glyph_upgrade_gizmo()
+    if glyph then
+        return glyph:get_position(), 'glyph'
+    end
+    if tracker.glyph_anchor_pos ~= nil then
+        return tracker.glyph_anchor_pos, 'glyph'
+    end
+    if _last_choron_pos ~= nil then
+        return _last_choron_pos, 'choron'
+    end
+    if death_pos ~= nil then
+        return death_pos, 'last_alive'
+    end
+    return nil, nil
+end
 
 local function update_death_recovery()
+    -- Beta gate: feature disabled by default while it's being validated.
+    -- Any in-flight recovery state is wiped so flipping the toggle off mid-run
+    -- doesn't leave the task pinned to a stale recovery target.
+    if not settings.death_recovery then
+        if _respawn_recovery_pos ~= nil or _last_player_pos ~= nil then
+            _respawn_recovery_pos  = nil
+            _respawn_recovery_kind = nil
+            _last_player_pos       = nil
+        end
+        return
+    end
     if not utils.player_in_pit() then
-        _last_player_pos      = nil
-        _respawn_recovery_pos = nil
+        _last_player_pos       = nil
+        _respawn_recovery_pos  = nil
+        _respawn_recovery_kind = nil
         return
     end
     local pos = get_player_position()
@@ -87,32 +133,45 @@ local function update_death_recovery()
         local jump = utils.distance(pos, _last_player_pos)
         if jump > RESPAWN_JUMP_THRESHOLD then
             -- Position jumped without a portal use: classify as death + respawn.
-            -- Only arm recovery if we have a recently-seen portal to chase.
-            if _last_portal_pos ~= nil
-                and (now - _last_portal_seen_t) <= PORTAL_REMEMBER_TTL
-            then
-                _respawn_recovery_pos = vec3:new(_last_portal_pos:x(), _last_portal_pos:y(), _last_portal_pos:z())
-                _respawn_recovery_t   = now
-                _respawn_long_path_t  = -math.huge
+            -- _last_player_pos is the death point (last frame before respawn);
+            -- pass it as the bottom-of-chain fallback so we can resume the
+            -- exact frontier we were exploring when we died.
+            local target, kind = pick_recovery_target(now, _last_player_pos)
+            if target ~= nil then
+                _respawn_recovery_pos  = vec3:new(target:x(), target:y(), target:z())
+                _respawn_recovery_t    = now
+                _respawn_recovery_kind = kind
+                _respawn_long_path_t   = -math.huge
                 console.print(string.format(
-                    "[portal] respawn detected (jumped %.1f units) — routing back to last-seen portal at (%.1f,%.1f) seen %.0fs ago",
-                    jump, _respawn_recovery_pos:x(), _respawn_recovery_pos:y(),
-                    now - _last_portal_seen_t))
+                    "[portal] respawn detected (jumped %.1f units) — recovering to %s at (%.1f,%.1f) dist=%.1f",
+                    jump, kind,
+                    _respawn_recovery_pos:x(), _respawn_recovery_pos:y(),
+                    utils.distance(pos, _respawn_recovery_pos)))
             else
                 console.print(string.format(
-                    "[portal] respawn detected (jumped %.1f units) — no recent portal to recover to (last_seen=%s)",
-                    jump,
-                    _last_portal_pos and string.format("%.0fs ago", now - _last_portal_seen_t) or "never"))
+                    "[portal] respawn detected (jumped %.1f units) — no recovery target available",
+                    jump))
             end
         end
     end
     _last_player_pos = vec3:new(pos:x(), pos:y(), pos:z())
 
-    -- Recovery timeout / cancel
+    -- Recovery clears on (a) arrival, or (b) timeout. Portal kind also clears
+    -- in get_portal() once the actor is back in detection range, but if the
+    -- portal is gone (e.g. it was the actual death point) the arrival check
+    -- still terminates recovery so explore_pit can take over the same area.
     if _respawn_recovery_pos ~= nil then
-        if (now - _respawn_recovery_t) > RESPAWN_RECOVERY_TIMEOUT then
+        local d = utils.distance(pos, _respawn_recovery_pos)
+        if d < RESPAWN_ARRIVAL_RADIUS then
+            console.print(string.format(
+                "[portal] respawn recovery: arrived at %s target (dist=%.1f) — clearing",
+                _respawn_recovery_kind or 'unknown', d))
+            _respawn_recovery_pos  = nil
+            _respawn_recovery_kind = nil
+        elseif (now - _respawn_recovery_t) > RESPAWN_RECOVERY_TIMEOUT then
             console.print("[portal] respawn recovery timed out — clearing")
-            _respawn_recovery_pos = nil
+            _respawn_recovery_pos  = nil
+            _respawn_recovery_kind = nil
         end
     end
 end
@@ -146,6 +205,16 @@ local function update_back_portal_tracking()
         current_world_name = nil
         back_portal_pos = nil
         portal_just_used = false
+        -- Pit-exit: also wipe death-recovery state so it can't bleed into the
+        -- next pit run.  shouldExecute already does this on its early-return
+        -- path, but keep the wipe here too in case this runs first.
+        _respawn_recovery_pos  = nil
+        _respawn_recovery_kind = nil
+        _last_player_pos       = nil
+        _last_portal_pos       = nil
+        _last_portal_seen_t    = -math.huge
+        _last_choron_pos       = nil
+        _last_choron_seen_t    = -math.huge
         return
     end
     local world = get_current_world()
@@ -176,6 +245,20 @@ local function update_back_portal_tracking()
     -- Invalidate cache: actor pointers from previous world are no longer relevant
     _portal_cache = nil
     _portal_cache_time = -1
+    -- Wipe per-floor recovery state. _last_portal_pos from the previous floor
+    -- maps to coords that don't correspond to anything in this world; keeping
+    -- it would route post-death recovery back to a phantom location. Choron's
+    -- Soul only spawns on the boss floor — its position is also per-floor.
+    -- (boss/glyph tracker state is cleared at portal interaction further down.)
+    _last_portal_pos       = nil
+    _last_portal_seen_t    = -math.huge
+    _last_choron_pos       = nil
+    _last_choron_seen_t    = -math.huge
+    -- Active recovery target also doesn't survive a world change — its coords
+    -- belong to whichever floor we just left.
+    _respawn_recovery_pos  = nil
+    _respawn_recovery_kind = nil
+    _last_player_pos       = nil
 end
 
 local function is_back_portal(actor)
@@ -204,6 +287,14 @@ local get_portal = function ()
     local dump_now = (now - _last_portal_dump) >= PORTAL_DUMP_INTERVAL
     for _, actor in pairs(actors) do
         local actor_name = actor:get_skin_name()
+        -- Stamp Choron's Soul position whenever we see it. Cheap to piggyback
+        -- on the existing actor iteration; used by the death-recovery fallback
+        -- chain when no portal/boss/glyph anchor is available.
+        if actor_name == CHORON_SOUL_ACTOR then
+            local cp = actor:get_position()
+            _last_choron_pos    = vec3:new(cp:x(), cp:y(), cp:z())
+            _last_choron_seen_t = now
+        end
         if actor_name and actor_name:match('Portal')
             -- Light_NoShadows_Portal_Dungeon_Generic is a decorative lighting actor
             -- that mirrors the portal's position; never use it for pathing.
@@ -253,7 +344,8 @@ local get_portal = function ()
         -- the regular flow takes over from here.
         if _respawn_recovery_pos ~= nil then
             console.print("[portal] portal back in detection range — clearing respawn recovery")
-            _respawn_recovery_pos = nil
+            _respawn_recovery_pos  = nil
+            _respawn_recovery_kind = nil
         end
         return found_portal
     end
@@ -262,7 +354,29 @@ local get_portal = function ()
     return nil
 end
 task.shouldExecute = function ()
-    if not utils.player_in_pit() then return false end
+    if not utils.player_in_pit() then
+        -- Pit-exit cleanup: wipe death-recovery state here.  Without this, a
+        -- recovery target armed in the previous pit run survives across
+        -- exit→teleport→re-enter (update_back_portal_tracking + the cleanup
+        -- inside update_death_recovery only run when this task gets past the
+        -- not-in-pit gate, which it doesn't on travel frames). Result: stale
+        -- "respawn recovery: long_path back to <kind> target" log on the
+        -- first frame of the new pit until the timeout fires.
+        if _respawn_recovery_pos ~= nil
+            or _last_player_pos ~= nil
+            or _last_portal_pos ~= nil
+            or _last_choron_pos ~= nil
+        then
+            _respawn_recovery_pos  = nil
+            _respawn_recovery_kind = nil
+            _last_player_pos       = nil
+            _last_portal_pos       = nil
+            _last_portal_seen_t    = -math.huge
+            _last_choron_pos       = nil
+            _last_choron_seen_t    = -math.huge
+        end
+        return false
+    end
     -- Drive death-recovery jump detection on every shouldExecute call (cheap;
     -- gates inside on player_in_pit and same-world). When recovery is armed
     -- we want this task to win the priority slot until the portal becomes
@@ -285,16 +399,19 @@ local PATH_RETRY_INTERVAL = 2  -- seconds; if long-path stops navigating, retry 
 task.Execute = function ()
     local local_player = get_local_player()
     if not local_player then return end
-    orbwalker.set_clear_toggle(true)
+    settings.orb_set_clear(true)
     local portal = get_portal()
     if portal == nil then
         -- Death-recovery branch: portal isn't visible (we're back at the
-        -- checkpoint after dying), but we remember where it was. Long-path
-        -- back; once we're within PORTAL_DETECTION_RADIUS, get_portal()
-        -- starts returning the actor and the regular flow takes over.
+        -- checkpoint after dying). Target was picked by pick_recovery_target()
+        -- using the priority chain (descend portal > boss > glyph > Choron's
+        -- Soul > last-alive position). Long-path back until either the portal
+        -- comes back into detection range, we get within RESPAWN_ARRIVAL_RADIUS
+        -- of the target, or we time out.
         if _respawn_recovery_pos ~= nil then
             local now = get_time_since_inject()
             local dist = utils.distance(local_player, _respawn_recovery_pos)
+            local kind = _respawn_recovery_kind or 'unknown'
             BatmobilePlugin.pause(plugin_label)
             BatmobilePlugin.update(plugin_label)
             local need_repath = false
@@ -307,8 +424,8 @@ task.Execute = function ()
             end
             if need_repath then
                 console.print(string.format(
-                    "[portal] respawn recovery: long_path back to last-seen portal (dist=%.1f)",
-                    dist))
+                    "[portal] respawn recovery: long_path back to %s target (dist=%.1f)",
+                    kind, dist))
                 local started = BatmobilePlugin.navigate_long_path(plugin_label, _respawn_recovery_pos)
                 if not started then
                     console.print("[portal] respawn recovery long_path FAILED — retrying")
@@ -316,7 +433,7 @@ task.Execute = function ()
                 _respawn_long_path_t = now
             end
             BatmobilePlugin.move(plugin_label)
-            task.status = string.format('respawn recovery (%.0f to portal)', dist)
+            task.status = string.format('respawn recovery → %s (%.0fu)', kind, dist)
             return
         end
         if task.portal_found then

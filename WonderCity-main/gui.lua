@@ -137,6 +137,7 @@ gui.elements = {
     enticement_timeout = slider_int:new(0, 10, 4, get_hash(plugin_label .. '_' .. 'enticement_timeout')),
     beacon_timeout = slider_int:new(0, 30, 10, get_hash(plugin_label .. '_' .. 'beacon_timeout')),
     skip_monsters = create_checkbox(false, 'skip_monsters'),
+    manage_orbwalker = create_checkbox(false, 'manage_orbwalker'),
     use_custom_explorer = create_checkbox(false, 'use_custom_explorer'),
     batmobile_priority = combo_box:new(1, get_hash(plugin_label .. '_' .. 'batmobile_priority')),
 
@@ -213,7 +214,10 @@ gui.render = function ()
         gui.elements.enticement_timeout:render('Enticement delay (s)', 'time in seconds to wait before leaving enticement')
         gui.elements.beacon_timeout:render('Beacon delay (s)', 'time in seconds to wait before leaving beacon')
         gui.elements.loot_obols:render('Loot Obols', 'Loot Obols')
-        gui.elements.skip_monsters:render('Skip monsters', 'Disable orbwalker until reaching an enticement, beacon, elite or boss')
+        gui.elements.manage_orbwalker:render('Manage orbwalker', 'When enabled, this script will toggle orbwalker clear/block-movement during undercity tasks. Off by default — leaves orbwalker fully under your rotation\'s control.')
+        if gui.elements.manage_orbwalker:get() then
+            gui.elements.skip_monsters:render('Skip monsters', 'Disable orbwalker until reaching an enticement, beacon, elite or boss')
+        end
         gui.elements.use_custom_explorer:render('Use custom explorer', 'Use the WonderCity targeted explorer instead of Batmobile full-coverage (objective-first BFS)')
 
         if gui.elements.tribute_priority_tree:push('Tribute Priority') then

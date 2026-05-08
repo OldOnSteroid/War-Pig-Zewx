@@ -10,6 +10,7 @@ local utils    = require "core.utils"
 local tracker  = require "core.tracker"
 local rotation = require "core.boss_rotation"
 local enums    = require "data.enums"
+local settings = require "core.settings"
 
 local stuck_position = nil
 
@@ -46,7 +47,7 @@ local ALTAR_TETHER = 15.0
 local task = { name = "Kill Monsters" }
 
 function task.reset()
-    orbwalker.set_clear_toggle(false)
+    settings.orb_set_clear(false)
 end
 
 function task.shouldExecute()
@@ -56,8 +57,8 @@ function task.shouldExecute()
 end
 
 function task.Execute()
-    orbwalker.set_clear_toggle(true)
-    orbwalker.set_block_movement(true)
+    settings.orb_set_clear(true)
+    settings.orb_set_block(true)
 
     -- Always chase suppressor orbs (need to burst them to unblock combat)
     local suppressor = utils.get_suppressor()

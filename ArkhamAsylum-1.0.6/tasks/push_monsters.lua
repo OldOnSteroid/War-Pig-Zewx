@@ -274,8 +274,8 @@ task.Execute = function()
     local player_pos = get_player_position()
     local now = get_time_since_inject()
 
-    orbwalker.set_clear_toggle(true)
-    orbwalker.set_block_movement(true)
+    settings.orb_set_clear(true)
+    settings.orb_set_block(true)
 
     local weighted, has_boss, nearby = get_weighted_near_player(player_pos)
 

@@ -178,7 +178,8 @@ local function do_click(x, y, label)
         end
     else
         log(string.format('%s: SKIP click — coords (%d, %d) are zero. ' ..
-            'Set them via the GUI sliders.', label, x, y))
+            'Open the WarPug menu, hover the button in-game, and press the ' ..
+            'configured "Set %s Pos" keybind to capture it.', label, x, y, label))
     end
 end
 
@@ -473,6 +474,14 @@ function planner.get_status_line()
         return string.format('WarPug: %s (reroll %d/%d)', state, reroll_count, MAX_REROLLS)
     end
     return 'WarPug: ' .. state
+end
+
+-- Public wrapper around the internal do_click. Used by main.lua's test
+-- sequencer so a test fire goes through the exact same path (mouse_move +
+-- mouse_click + record_click) the live REROLL_CLICK1/2 states use, including
+-- the yellow fading-circle overlay.
+function planner.fire_click(x, y, label)
+    do_click(x, y, label)
 end
 
 return planner

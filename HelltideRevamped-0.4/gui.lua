@@ -34,6 +34,7 @@ gui.elements = {
     farm_cinder_threshold = slider_int:new(0, 250, 0, get_hash(plugin_label .. "_farm_cinder_threshold")),
     do_maiden_toggle = create_checkbox(false, plugin_label .. "do_maiden_toggle"),
     maiden_disable_cinders = slider_int:new(0, 1000, 0, get_hash(plugin_label .. "_maiden_disable_cinders")),
+    manage_orbwalker = create_checkbox(false, plugin_label .. "manage_orbwalker"),
 }
 
 function gui.render()
@@ -42,6 +43,7 @@ function gui.render()
     gui.elements.main_toggle:render("Enable", "Enable the bot")
     
     if gui.elements.settings_tree:push("Settings") then
+        gui.elements.manage_orbwalker:render("Manage orbwalker", "When enabled, this script will toggle orbwalker clear during helltide tasks. Off by default — leaves orbwalker fully under your rotation's control.")
         gui.elements.town:render("Idle town", gui.town, "Town to teleport to between helltides and after Batmobile gives up. Match this to your Alfred town setting to avoid bouncing.")
         gui.elements.salvage_toggle:render("Salvage with alfred", "Enable salvaging items with alfred")
         gui.elements.silent_chest_toggle:render("Open Silent Chest (key required)", "Open silent chest")

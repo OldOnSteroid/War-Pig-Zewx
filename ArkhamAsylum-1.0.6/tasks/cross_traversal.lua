@@ -1,6 +1,7 @@
 local plugin_label = 'arkham_asylum'
 
 local utils = require 'core.utils'
+local settings = require 'core.settings'
 local portal_task = require 'tasks.portal'
 
 -- Higher-priority task than portal: when portal task can't pathfind around
@@ -176,7 +177,7 @@ task.Execute = function ()
 
     -- If navigator's own trav routing engaged, drive it.
     if BatmobilePlugin.is_traversal_routing() then
-        orbwalker.set_clear_toggle(true)
+        settings.orb_set_clear(true)
         BatmobilePlugin.update(plugin_label)
         BatmobilePlugin.move(plugin_label)
         task.status = 'nav_crossing'
@@ -216,8 +217,8 @@ task.Execute = function ()
     -- Take movement control: pause batmobile (stops explore_pit/select_target
     -- from setting competing targets) and block orbwalker movement (so it
     -- doesn't chase enemies away from the gizmo). Spell-casting stays on.
-    orbwalker.set_clear_toggle(true)
-    orbwalker.set_block_movement(true)
+    settings.orb_set_clear(true)
+    settings.orb_set_block(true)
     BatmobilePlugin.pause(plugin_label)
 
     local trav_pos = trav:get_position()

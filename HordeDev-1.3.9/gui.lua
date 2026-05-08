@@ -67,6 +67,7 @@ gui.elements = {
     use_10_wave = create_checkbox(true, "use_10_wave"),
     use_bloodied = create_checkbox(false, "use_bloodied"),
     exit_mode = combo_box:new(0, get_hash(plugin_label .. "_exit_mode")),
+    manage_orbwalker = create_checkbox(false, "manage_orbwalker"),
 }
 
 function gui.render()
@@ -78,6 +79,7 @@ function gui.render()
         gui.elements.keybind_toggle:render("Toggle Keybind", "Toggle the bot for quick enable");
     end
     if gui.elements.settings_tree:push("Settings") then
+        gui.elements.manage_orbwalker:render("Manage orbwalker", "When enabled, this script will toggle orbwalker clear during horde tasks. Off by default — leaves orbwalker fully under your rotation's control.");
         gui.elements.run_pit_toggle:render("Run pit when finish compasses", "Run pit when finish compasses");
         gui.elements.party_mode_toggle:render("Party mode (Does not pick pylon)", "Does not activate Pylon");
         gui.elements.do_bartuc_toggle:render("Do Bartuc", "Choose Bartuc as first choice");

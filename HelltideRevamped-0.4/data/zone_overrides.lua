@@ -22,6 +22,11 @@ local overrides = {
     },
 }
 
+-- Zones where the helltide task should never run (bot teleports away instead).
+local excluded_zones = {
+    { world_name = "Sanctuary_Eastern_Continent", zone_name = "Hawe_ZakFort" },
+}
+
 local M = {}
 
 -- Returns the override entry that matches the current world+zone, or nil.
@@ -38,6 +43,20 @@ function M.get_current()
         end
     end
     return nil
+end
+
+-- Returns true when the current zone is explicitly excluded from helltide farming.
+function M.is_excluded_zone()
+    local world = get_current_world()
+    if not world then return false end
+    local wname = world:get_name()
+    local zname = world:get_current_zone_name()
+    for _, e in ipairs(excluded_zones) do
+        if e.world_name == wname and e.zone_name == zname then
+            return true
+        end
+    end
+    return false
 end
 
 return M

@@ -161,6 +161,15 @@ task.shouldExecute = function ()
         return true
     end
     -- Remembered hunt: we've seen one and it's still alive somewhere on this floor.
+    -- This branch primarily handles death+revive ("path back to remembered boss
+    -- pos without exploring") — gated behind the post-death-recovery beta flag.
+    -- When disabled, kill_boss only engages while the boss is in find_boss()
+    -- scan range; otherwise we yield to portal / explore_pit / kill_monster and
+    -- let normal exploration walk us back into scan range.
+    if not settings.death_recovery then
+        reset_remembered_hunt_state()
+        return false
+    end
     if tracker.boss_seen and tracker.boss_position then
         -- Suppression cooldown active (post-revive unreachable cache, etc.)
         -- — yield to portal / explore_pit / kill_monster.  When the cooldown
@@ -188,8 +197,8 @@ task.Execute = function ()
     if not local_player then return end
     BatmobilePlugin.pause(plugin_label)
     BatmobilePlugin.update(plugin_label)
-    orbwalker.set_clear_toggle(true)
-    orbwalker.set_block_movement(true)
+    settings.orb_set_clear(true)
+    settings.orb_set_block(true)
 
     local boss = find_boss()
     if boss then

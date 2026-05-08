@@ -14,8 +14,10 @@ local settings = {
     table_actor_name = TABLE_ACTOR_NAME,
     reroll_click_x   = 0,
     reroll_click_y   = 0,
+    reroll_set       = false,
     reroll_confirm_x = 0,
     reroll_confirm_y = 0,
+    confirm_set      = false,
     show_click_points = false,
     verbose_logs     = false,
 }
@@ -25,13 +27,18 @@ settings.update_settings = function()
     settings.show_click_points = gui.elements.show_click_points:get()
     settings.verbose_logs      = gui.elements.verbose_logs:get()
 
-    -- Pick the resolution preset whose width best matches the actual screen.
-    local res     = gui.pick_resolution(gui.get_screen_width(), gui.get_screen_height())
-    local sliders = gui.res_sliders[res.key]
-    settings.reroll_click_x   = sliders.reroll_x:get()
-    settings.reroll_click_y   = sliders.reroll_y:get()
-    settings.reroll_confirm_x = sliders.confirm_x:get()
-    settings.reroll_confirm_y = sliders.confirm_y:get()
+    -- Resolve the captured relative (0..1) coords against the live screen
+    -- size each tick. Y clamped to >= 1 to dodge the OS title-bar dead zone
+    -- (mirrors Reaper-main/core/input.lua's clamp).
+    local sw = get_screen_width()
+    local sh = get_screen_height()
+    local p  = gui.positions
+    settings.reroll_click_x   = math.floor(p.reroll_rx  * sw)
+    settings.reroll_click_y   = math.max(1, math.floor(p.reroll_ry  * sh))
+    settings.reroll_confirm_x = math.floor(p.confirm_rx * sw)
+    settings.reroll_confirm_y = math.max(1, math.floor(p.confirm_ry * sh))
+    settings.reroll_set       = p.reroll_set
+    settings.confirm_set      = p.confirm_set
 end
 
 return settings

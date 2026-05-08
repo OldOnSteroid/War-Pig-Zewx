@@ -11,79 +11,137 @@ end
 gui.plugin_label   = plugin_label
 gui.plugin_version = plugin_version
 
--- ── Resolution presets ────────────────────────────────────────────────────────
--- Settings picks the closest match to the actual screen width at runtime.
--- The combo in the GUI controls which preset you are currently configuring.
-gui.RESOLUTIONS = {
-    { label = '1920 \xc3\x97 1080  (Full HD)',           w = 1920, h = 1080, key = '1080p'   },
-    { label = '1920 \xc3\x97 1200  (WUXGA)',             w = 1920, h = 1200, key = '1200p'   },
-    { label = '2560 \xc3\x97 1080  (UltraWide FHD)',     w = 2560, h = 1080, key = '1080uw'  },
-    { label = '2560 \xc3\x97 1440  (QHD / 2K)',          w = 2560, h = 1440, key = '1440p'   },
-    { label = '2560 \xc3\x97 1600  (WQXGA)',             w = 2560, h = 1600, key = '1600p'   },
-    { label = '3440 \xc3\x97 1440  (UltraWide QHD)',     w = 3440, h = 1440, key = '1440uw'  },
-    { label = '3840 \xc3\x97 1600  (UltraWide QHD+)',    w = 3840, h = 1600, key = '1600uw'  },
-    { label = '3840 \xc3\x97 2160  (4K UHD)',            w = 3840, h = 2160, key = '4k'      },
-    { label = '5120 \xc3\x97 1440  (Super UltraWide)',   w = 5120, h = 1440, key = '5120uw'  },
-    { label = '7680 \xc3\x97 4320  (8K UHD)',            w = 7680, h = 4320, key = '8k'      },
+-- ── Captured click positions ─────────────────────────────────────────────────
+-- Stored as RELATIVE coords (0..1 of screen w/h) so values stay correct if
+-- the user changes resolution. Persisted to positions.txt in the plugin root.
+-- The file format is plain `key=value` lines so we don't need a JSON parser
+-- for four numbers.
+--
+-- We keep this in a side-table because pushing values back into a slider via
+-- `:set()` is unreliable on this user's QQT host (past investigations showed
+-- it can crash mid-frame / corrupt UI state).
+gui.positions = {
+    reroll_rx   = 0.0,
+    reroll_ry   = 0.0,
+    confirm_rx  = 0.0,
+    confirm_ry  = 0.0,
+    reroll_set  = false,
+    confirm_set = false,
 }
 
--- Per-resolution slider pairs: reroll X/Y and confirm X/Y.
--- Only the sliders for the selected resolution are shown; all sets are always
--- created so their hashed values persist across resolution switches.
-gui.res_sliders = {}
-for _, res in ipairs(gui.RESOLUTIONS) do
-    local k = res.key
-    gui.res_sliders[k] = {
-        reroll_x  = slider_int:new(0, res.w, 0, get_hash(plugin_label .. '_rx_'  .. k)),
-        reroll_y  = slider_int:new(0, res.h, 0, get_hash(plugin_label .. '_ry_'  .. k)),
-        confirm_x = slider_int:new(0, res.w, 0, get_hash(plugin_label .. '_cx_'  .. k)),
-        confirm_y = slider_int:new(0, res.h, 0, get_hash(plugin_label .. '_cy_'  .. k)),
-    }
+local function get_plugin_root_path()
+    local plugin_root = string.gmatch(package.path, '.*?\\?')()
+    plugin_root = plugin_root:gsub('?', '')
+    return plugin_root
 end
 
--- ── Screen helpers (used both here and in settings.lua via gui) ──────────────
-function gui.get_screen_width()
-    if utility and type(utility.get_screen_width) == 'function' then
-        local ok, w = pcall(utility.get_screen_width)
-        if ok and type(w) == 'number' then return w end
+local POS_FILE = get_plugin_root_path() .. 'positions.txt'
+
+local function save_positions()
+    local file, err = io.open(POS_FILE, 'w')
+    if not file then
+        console.print('[WarPug] failed to open ' .. POS_FILE .. ' for write: ' .. tostring(err))
+        return
     end
-    return 1920
+    file:write(string.format('reroll_rx=%.6f\n',  gui.positions.reroll_rx))
+    file:write(string.format('reroll_ry=%.6f\n',  gui.positions.reroll_ry))
+    file:write(string.format('confirm_rx=%.6f\n', gui.positions.confirm_rx))
+    file:write(string.format('confirm_ry=%.6f\n', gui.positions.confirm_ry))
+    file:write(string.format('reroll_set=%s\n',   tostring(gui.positions.reroll_set)))
+    file:write(string.format('confirm_set=%s\n',  tostring(gui.positions.confirm_set)))
+    file:close()
 end
 
-function gui.get_screen_height()
-    if utility and type(utility.get_screen_height) == 'function' then
-        local ok, h = pcall(utility.get_screen_height)
-        if ok and type(h) == 'number' then return h end
-    end
-    return 1080
-end
-
--- Returns the resolution preset closest to (screen_w, screen_h).
--- Width is weighted 2× over height so landscape variants resolve correctly.
-function gui.pick_resolution(screen_w, screen_h)
-    screen_h = screen_h or 0
-    local best, best_score = gui.RESOLUTIONS[1], math.huge
-    for _, res in ipairs(gui.RESOLUTIONS) do
-        local score = math.abs(res.w - screen_w) * 2 + math.abs(res.h - screen_h)
-        if score < best_score then
-            best       = res
-            best_score = score
+local function load_positions()
+    local file = io.open(POS_FILE, 'r')
+    if not file then return end  -- first run, file doesn't exist yet
+    for line in file:lines() do
+        local k, v = line:match('^([%w_]+)=(.+)$')
+        if k and v then
+            if k == 'reroll_set' or k == 'confirm_set' then
+                gui.positions[k] = (v == 'true')
+            else
+                local n = tonumber(v)
+                if n and gui.positions[k] ~= nil then
+                    gui.positions[k] = n
+                end
+            end
         end
     end
-    return best
+    file:close()
 end
+
+load_positions()
 
 -- ── GUI elements ─────────────────────────────────────────────────────────────
 gui.elements = {
     main_tree   = tree_node:new(0),
     main_toggle = ck(false, 'main_toggle'),
 
-    -- Combo index selects which resolution's sliders to display (0-based).
-    res_combo = combo_box:new(0, get_hash(plugin_label .. '_res_combo')),
+    -- 0x0A = harness convention for "no key bound yet" (matches WarPigs/HordeDev).
+    -- Second arg `true` matches the predominant working pattern across this
+    -- codebase (Alfred / HordeDev / Batmobile / MapRevealPathTest). With
+    -- `false`, presses weren't registering as state==1 on this host.
+    keybind_set_reroll  = keybind:new(0x0A, true, get_hash(plugin_label .. '_kb_set_reroll')),
+    keybind_set_confirm = keybind:new(0x0A, true, get_hash(plugin_label .. '_kb_set_confirm')),
+    keybind_test_clicks = keybind:new(0x0A, true, get_hash(plugin_label .. '_kb_test_clicks')),
 
     show_click_points = ck(false, 'show_click_points'),
     verbose_logs      = ck(false, 'verbose_logs'),
 }
+
+local function fmt_pos(rx, ry, set)
+    if not set then return 'not captured' end
+    local sw, sh = get_screen_width(), get_screen_height()
+    local px = math.floor(rx * sw)
+    local py = math.floor(ry * sh)
+    return string.format('rel %.3f, %.3f  (= %dpx, %dpx at %dx%d)',
+                         rx, ry, px, py, sw, sh)
+end
+
+-- Polls the capture keybinds. Called every on_update tick (not gated by the
+-- planner's TICK_INTERVAL) so a key press is never missed.
+--
+-- The `true`-mode keybind can return state==1 for several consecutive frames
+-- while the key is held; without a debounce a tap would fire several captures
+-- in a row. 0.5s comfortably covers a normal tap.
+local CAPTURE_DEBOUNCE_S = 0.5
+local last_capture_time  = -math.huge
+
+function gui.poll_keybinds()
+    local function capture(field_x, field_y, field_set, label)
+        local now = get_time_since_inject()
+        if (now - last_capture_time) < CAPTURE_DEBOUNCE_S then return end
+        last_capture_time = now
+
+        local cx, cy = utility.get_cursor_screen_position()
+        if not cx or not cy then
+            console.print('[WarPug] capture failed: cursor position unavailable')
+            return
+        end
+        local sw, sh = get_screen_width(), get_screen_height()
+        if sw <= 0 or sh <= 0 then
+            console.print('[WarPug] capture failed: bad screen size')
+            return
+        end
+        gui.positions[field_x]   = cx / sw
+        gui.positions[field_y]   = cy / sh
+        gui.positions[field_set] = true
+        save_positions()
+        console.print(string.format(
+            '[WarPug] %s captured: %dpx, %dpx  -> rel %.4f, %.4f (saved)',
+            label, cx, cy, gui.positions[field_x], gui.positions[field_y]))
+    end
+
+    local kb_r = gui.elements.keybind_set_reroll
+    if kb_r:get_state() == 1 and kb_r:get_key() ~= 0x0A then
+        capture('reroll_rx', 'reroll_ry', 'reroll_set', 'Reroll')
+    end
+    local kb_c = gui.elements.keybind_set_confirm
+    if kb_c:get_state() == 1 and kb_c:get_key() ~= 0x0A then
+        capture('confirm_rx', 'confirm_ry', 'confirm_set', 'RerollConfirm')
+    end
+end
 
 -- ── Render ────────────────────────────────────────────────────────────────────
 gui.render = function()
@@ -96,50 +154,33 @@ gui.render = function()
         'a new war plan path. Warplans_NightmareDungeons nodes are always excluded.\n' ..
         'If no valid path exists, click the configured reroll target and confirm.')
 
-    -- ── Click calibration ────────────────────────────────────────────────────
+    render_menu_header('Click position calibration')
 
-    -- Build the label list for the combo.
-    local res_labels = {}
-    for _, res in ipairs(gui.RESOLUTIONS) do
-        res_labels[#res_labels + 1] = res.label
-    end
+    gui.elements.keybind_set_reroll:render('Set Reroll Pos',
+        'Hover the war plan reroll/refresh button in-game, then press this key\n' ..
+        'to capture its position. Values are saved as relative (0..1) coordinates\n' ..
+        'so they stay valid at any resolution.\n\n' ..
+        'Currently saved: ' .. fmt_pos(gui.positions.reroll_rx,
+                                       gui.positions.reroll_ry,
+                                       gui.positions.reroll_set))
+    gui.elements.keybind_set_confirm:render('Set Confirm Pos',
+        'Hover the confirm button on the reroll dialog, then press this key\n' ..
+        'to capture its position.\n\n' ..
+        'Currently saved: ' .. fmt_pos(gui.positions.confirm_rx,
+                                       gui.positions.confirm_ry,
+                                       gui.positions.confirm_set))
+    gui.elements.keybind_test_clicks:render('Test Click Sequence',
+        'Fires the same Reroll click \xe2\x86\x92 1.5s wait \xe2\x86\x92 Confirm click\n' ..
+        'sequence the planner would. Uses the captured positions, the same\n' ..
+        'mouse_move + mouse_click path, and the same yellow-fade overlay so\n' ..
+        'you can verify both targets land on the right buttons before\n' ..
+        'enabling WarPug.\n\n' ..
+        'Disable WarPug before testing — the test refuses to run while the\n' ..
+        'live state machine is active to avoid two click sequences fighting.')
 
-    -- Detect which preset will actually be used at runtime.
-    local active_res   = gui.pick_resolution(gui.get_screen_width(), gui.get_screen_height())
-    local active_label = active_res.label
-
-    render_menu_header('Click position calibration  [active: ' .. active_label .. ']')
-
-    gui.elements.res_combo:render('Configure resolution', res_labels,
-        'Select which resolution to configure below.\n' ..
-        'At runtime the closest preset to your actual screen width is used automatically.\n' ..
-        'Currently detected: ' .. active_label)
-
-    -- Clamp combo index to valid range (safety against stale saved value).
-    local idx = math.max(0, math.min(#gui.RESOLUTIONS - 1, gui.elements.res_combo:get()))
-    local res     = gui.RESOLUTIONS[idx + 1]
-    local sliders = gui.res_sliders[res.key]
-
-    render_menu_header(string.format('Reroll click  (%d \xc3\x97 %d)', res.w, res.h))
-    sliders.reroll_x:render('Reroll X \xe2\x86\x94',
-        string.format('Pixel X of the reroll/refresh button on the war plan panel.\n' ..
-            'Range: 0 \xe2\x80\x93 %d  (left \xe2\x86\x92 right)', res.w))
-    sliders.reroll_y:render('Reroll Y \xe2\x86\x95',
-        string.format('Pixel Y of the reroll/refresh button on the war plan panel.\n' ..
-            'Range: 0 \xe2\x80\x93 %d  (top \xe2\x86\x92 bottom)', res.h))
-
-    render_menu_header(string.format('Confirm click  (%d \xc3\x97 %d)', res.w, res.h))
-    sliders.confirm_x:render('Confirm X \xe2\x86\x94',
-        string.format('Pixel X of the confirm button in the reroll dialog.\n' ..
-            'Range: 0 \xe2\x80\x93 %d  (left \xe2\x86\x92 right)', res.w))
-    sliders.confirm_y:render('Confirm Y \xe2\x86\x95',
-        string.format('Pixel Y of the confirm button in the reroll dialog.\n' ..
-            'Range: 0 \xe2\x80\x93 %d  (top \xe2\x86\x92 bottom)', res.h))
-
-    -- ── Diagnostics ──────────────────────────────────────────────────────────
     render_menu_header('Diagnostics')
     gui.elements.show_click_points:render('Show click positions',
-        'Draw green crosshairs at both configured click targets. Recent scripted\n' ..
+        'Draw green crosshairs at both captured click targets. Recent scripted\n' ..
         'clicks also appear as a fading yellow circle for ~6s after firing.')
     gui.elements.verbose_logs:render('Verbose logs',
         'Print extra state-transition detail to the console.')

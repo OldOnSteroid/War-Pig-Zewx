@@ -31,6 +31,7 @@ local settings = {
     follower_explore = false,
     batmobile_priority = 'distance',
     disable_orbwalker_at_glyphstone = false,
+    manage_orbwalker = false,
     use_long_path = false,
     speed_mode = false,
     push_mode = false,
@@ -40,6 +41,7 @@ local settings = {
     push_boss_weight = 10,
     push_max_pull_dist = 40,
     push_min_cluster_weight = 5,
+    death_recovery = false,
 }
 
 settings.get_keybind_state = function ()
@@ -84,6 +86,7 @@ settings.update_settings = function ()
     settings.follower_explore = gui.elements.follower_explore:get()
     settings.batmobile_priority = gui.batmobile_priority[gui.elements.batmobile_priority:get()+1]
     settings.disable_orbwalker_at_glyphstone = gui.elements.disable_orbwalker_at_glyphstone:get()
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
     settings.use_long_path = gui.elements.use_long_path:get()
     settings.speed_mode = gui.elements.speed_mode:get()
     settings.push_mode = gui.elements.push_mode:get()
@@ -93,7 +96,20 @@ settings.update_settings = function ()
     settings.push_boss_weight = gui.elements.push_boss_weight:get()
     settings.push_max_pull_dist = gui.elements.push_max_pull_dist:get()
     settings.push_min_cluster_weight = gui.elements.push_min_cluster_weight:get()
+    settings.death_recovery = gui.elements.death_recovery:get()
 
+end
+
+settings.orb_set_clear = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_clear_toggle(v)
+    end
+end
+
+settings.orb_set_block = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_block_movement(v)
+    end
 end
 
 return settings

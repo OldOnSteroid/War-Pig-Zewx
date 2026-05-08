@@ -14,7 +14,7 @@ end
 local function main_pulse()
     settings:update_settings()
     if not local_player or not (settings.enabled and utils.get_keybind_state() ) then return end
-    if orbwalker.get_orb_mode() ~= 3 then
+    if settings.manage_orbwalker and orbwalker.get_orb_mode() ~= 3 then
         orbwalker.set_clear_toggle(true);
     end
     task_manager.execute_tasks()
