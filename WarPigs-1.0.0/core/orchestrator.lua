@@ -89,11 +89,57 @@ local function alfred_kick_if_needed()
     log('Alfred was paused with work pending — resumed and triggered (in town, pre-transition)')
 end
 
+-- Via-Temis-Alfred preamble: before EVERY warplan teleport (cold start + each
+-- handoff), drop the player at Temis and trigger Alfred so loot from the prior
+-- activity is salvaged/stashed/repaired before the next quest starts. The user
+-- explicitly asked for this — it costs an extra teleport for non-Pit activities
+-- but guarantees a clean inventory each cycle.
+local TEMIS_WP                = 0x1CE51E      -- Skov_Temis waypoint sno
+local TEMIS_ZONE              = 'Skov_Temis'
+local TEMIS_TELEPORT_TIMEOUT  = 30.0          -- retry the waypoint hop after this
+local TEMIS_TELEPORT_DEBOUNCE = 6.0           -- min gap between waypoint calls (channel ≈ 5s)
+-- Alfred dwell window. After firing trigger_tasks we need to give Alfred's main
+-- loop a beat to pick up the trigger and flip its busy/trigger_tasks flag —
+-- otherwise alfred_idle() returns true the instant we trigger and we leave the
+-- state immediately. ALFRED_GRACE_SECONDS is the "if Alfred never went busy
+-- there's nothing to do" timeout. ALFRED_MAX_SECONDS is the absolute safety cap.
+local ALFRED_GRACE_SECONDS    = 4.0
+local ALFRED_MAX_SECONDS      = 180.0
+
+local function in_temis()
+    local ok, w = pcall(function() return get_current_world() end)
+    if not ok or w == nil then return false end
+    local ok2, zname = pcall(function() return w:get_current_zone_name() end)
+    return ok2 and zname == TEMIS_ZONE
+end
+
+-- Resume Alfred if paused, then fire trigger_tasks. Returns true if a trigger
+-- was actually issued (Alfred loaded AND enabled). False means caller should
+-- skip the TEMIS_ALFRED dwell and go straight to the warplan teleport.
+local function alfred_trigger_now()
+    local alfred = _G.AlfredTheButlerPlugin
+    if not alfred or type(alfred.trigger_tasks) ~= 'function' then return false end
+    if type(alfred.get_status) == 'function' then
+        local ok, s = pcall(alfred.get_status)
+        if not (ok and type(s) == 'table' and s.enabled) then return false end
+        if s.paused and type(alfred.resume) == 'function' then pcall(alfred.resume) end
+    end
+    pcall(alfred.trigger_tasks, 'WarPigs')
+    return true
+end
+
 local teleport_transition = {
-    state      = 'IDLE',  -- IDLE | TELEPORTING
-    started_at = -math.huge,
-    snap_world = nil,  -- world name at the moment teleport was sent
-    snap_zone  = nil,  -- zone name at the moment teleport was sent
+    -- IDLE | TO_TEMIS | TEMIS_ALFRED | TELEPORTING
+    -- TO_TEMIS:     teleport_to_waypoint(TEMIS_WP) sent, waiting for arrival.
+    -- TEMIS_ALFRED: alfred_trigger_now() fired, waiting for Alfred to finish.
+    -- TELEPORTING:  warplan.teleport_to_activity() sent, waiting for confirmation.
+    state           = 'IDLE',
+    started_at      = -math.huge,
+    snap_world      = nil,  -- world name at the moment teleport was sent
+    snap_zone       = nil,  -- zone name at the moment teleport was sent
+    last_temis_tp   = -math.huge,  -- debounce for repeated TEMIS_WP calls
+    alfred_fired_at = nil,  -- time alfred_trigger_now() was called
+    alfred_was_busy = false, -- went busy at least once after trigger (saw work)
 }
 -- True when the teleport sequence still needs to start. Two trigger sources:
 --   * plugin_disable() — fires AFTER the previous activity's disable_when
@@ -164,6 +210,48 @@ local function has_helltide_buff()
     for _, buff in ipairs(buffs) do
         local ok2, hash = pcall(function() return buff.name_hash end)
         if ok2 and hash == HELLTIDE_BUFF_HASH then return true end
+    end
+    return false
+end
+
+-- Predicate: is the player already inside an Undercity dungeon zone? Mirrors
+-- WonderCity's `utils.player_in_undercity` (zone name match `X1_Undercity_`).
+-- Used as part of arrived_when for WarPlans_QST_Undercity so the orchestrator
+-- recognises an in-progress run and stops re-firing warplan.teleport_to_activity()
+-- — without this, mid-run teleport snapshots inside e.g. X1_Undercity_SnakeTemple_*
+-- never confirm (brazier-only arrived_when can't see it deep in the dungeon),
+-- and WarPigs loops on "teleport retry — world/zone unchanged" while WonderCity
+-- is trying to do its job.
+local function in_undercity_zone()
+    local ok, w = pcall(function() return get_current_world() end)
+    if not ok or w == nil then return false end
+    local ok2, zname = pcall(function() return w:get_current_zone_name() end)
+    if not ok2 or type(zname) ~= 'string' then return false end
+    return zname:match('X1_Undercity_') ~= nil
+end
+
+-- Predicate: are there live enemies close enough that the teleport channel
+-- will be interrupted by incoming damage? Used to defer
+-- warplan.teleport_to_activity() out of a helltide zone — once the rotation
+-- plugin clears the area, this returns false and the teleport fires
+-- immediately on the next tick.
+local COMBAT_NEARBY_RANGE = 12
+local function enemies_near_player()
+    if not _G.target_selector or type(target_selector.get_near_target_list) ~= 'function' then
+        return false
+    end
+    local lp = get_local_player()
+    if not lp then return false end
+    local ok_pos, pos = pcall(function() return lp:get_position() end)
+    if not ok_pos or not pos then return false end
+    local ok, list = pcall(target_selector.get_near_target_list, pos, COMBAT_NEARBY_RANGE)
+    if not ok or type(list) ~= 'table' then return false end
+    for _, e in pairs(list) do
+        local ok2, hp = pcall(function() return e:get_current_health() end)
+        if ok2 and hp and hp > 1 then
+            local ok3, untarg = pcall(function() return e:is_untargetable() end)
+            if not (ok3 and untarg) then return true end
+        end
     end
     return false
 end
@@ -299,10 +387,17 @@ orchestrator.quest_plugin_map = {
     WarPlans_QST_Undercity = {
         plugin       = 'WonderCityPlugin',
         disable_when = in_town_disable_when,  -- wait for the Kurast/Temis return
-        -- Brazier lives in the Undercity town zone. Same loop-prevention as
-        -- the Pit entry above — if already in town the teleport is a no-op.
+        -- Two-layer arrived check:
+        --   1. Brazier visible (Aubrie_Test_Undercity_Crafter) — we're at the
+        --      Undercity town crafter, ready to start a run. Same loop-prevention
+        --      as the Pit entry above — if already in town the teleport is a no-op.
+        --   2. Already inside an X1_Undercity_* zone — we're mid-run. WonderCity
+        --      owns the bot; WarPigs must not re-fire teleport_to_activity()
+        --      because the dungeon world/zone snapshot won't change between
+        --      retries and arrived_when is the only confirmation path.
         arrived_when = function()
             return actor_present('Aubrie_Test_Undercity_Crafter')
+                or in_undercity_zone()
         end,
     },
 
@@ -315,17 +410,34 @@ orchestrator.quest_plugin_map = {
     WarPlans_QST_InfernalHordes = {
         plugin = 'InfernalHordesPlugin',
         -- Quest vanishes when the wave bosses die, but HordeDev still has to
-        -- open chests and pick up loot. Defer disable until BOTH conditions:
-        --   (a) player has left BSK (normal post-horde exit), AND
-        --   (b) HordeDev reports chests done.
-        -- The (b) guard prevents a false-positive when Alfred TPs the player
-        -- to town mid-chest-run for a salvage pass — without it, leaving BSK
-        -- for salvage would immediately free the disable and WarPigs would
-        -- teleport to the next quest, skipping the remaining chests.
-        -- 60s safety cap ensures a stuck run can't block the orchestrator.
+        -- run its full post-boss cycle: open the talisman chest (if enabled),
+        -- the greater-affix chest (if enabled), the materials/selected chest,
+        -- then exit_horde teleports back to town. WarPigs must not preempt
+        -- any of those steps.
+        --
+        -- Primary gate: chests_done() — HordeDev sets this true only after
+        -- finish_chest_opening (or a hard exhaust). While it's false we hold
+        -- unconditionally; the previous version's 60s in-BSK timer fired in
+        -- the middle of "Waiting Talisman loot" and dropped GA + materials.
+        --
+        -- Once chests are done we wait for out-of-BSK as confirmation that
+        -- exit_horde has actually fired (it teleports the player to Caldeum).
+        -- Small safety cap covers a stuck exit_horde channel; while chests
+        -- are still progressing the cap is not started.
+        --
+        -- max_disable_defer_seconds overrides the global MAX_DISABLE_DEFER
+        -- so a slow chest sequence (talisman + GA + materials with loot
+        -- waits) can't be force-disabled by the orchestrator's safety net.
+        max_disable_defer_seconds = 300,
         disable_when = (function()
-            local defer_start
+            local exit_defer_start
             return function()
+                local p = _G.InfernalHordesPlugin
+                local done = p and type(p.chests_done) == 'function' and p.chests_done()
+                if not done then
+                    exit_defer_start = nil
+                    return false
+                end
                 local world = get_current_world()
                 local name
                 if world then
@@ -335,19 +447,12 @@ orchestrator.quest_plugin_map = {
                 local in_bsk = type(name) == 'string'
                     and name:find('BSK', 1, true) ~= nil
                 if not in_bsk then
-                    local p = _G.InfernalHordesPlugin
-                    local done = p and type(p.chests_done) == 'function' and p.chests_done()
-                    if done then
-                        defer_start = nil
-                        return true
-                    end
-                    -- Chests not done yet: player left BSK temporarily (salvage
-                    -- trip). Keep HordeDev alive so it can return and finish.
-                    -- Fall through to safety timer below.
+                    exit_defer_start = nil
+                    return true
                 end
-                defer_start = defer_start or get_time_since_inject()
-                if get_time_since_inject() - defer_start >= 60 then
-                    defer_start = nil
+                exit_defer_start = exit_defer_start or get_time_since_inject()
+                if get_time_since_inject() - exit_defer_start >= 60 then
+                    exit_defer_start = nil
                     return true
                 end
                 return false
@@ -667,11 +772,13 @@ function orchestrator.tick()
         if teleport_transition.state ~= 'IDLE' then
             log('died mid-transition (state=' .. teleport_transition.state ..
                 ') — re-arming teleport sequence for after respawn')
-            teleport_transition.state      = 'IDLE'
-            teleport_transition.started_at = -math.huge
-            teleport_pending               = true
-            teleport_incoming_first_seen   = nil
-            teleport_holding_logged        = false
+            teleport_transition.state           = 'IDLE'
+            teleport_transition.started_at      = -math.huge
+            teleport_transition.alfred_fired_at = nil
+            teleport_transition.alfred_was_busy = false
+            teleport_pending                    = true
+            teleport_incoming_first_seen        = nil
+            teleport_holding_logged             = false
         elseif settings.use_teleport_transition and not teleport_pending then
             -- Death outside an active transition still likely cancelled any
             -- in-progress in-game teleport channel (common when a mob hits
@@ -912,11 +1019,12 @@ function orchestrator.tick()
                 if not was_off[plugin_name] then was_off[plugin_name] = true end
             else
                 local force = false
+                local cap = entry.max_disable_defer_seconds or MAX_DISABLE_DEFER_SECONDS
                 if pending_disable[plugin_name] and pending_disable_since[plugin_name]
-                    and now - pending_disable_since[plugin_name] >= MAX_DISABLE_DEFER_SECONDS
+                    and now - pending_disable_since[plugin_name] >= cap
                 then
-                    log(string.format('forcing disable of %s — exceeded MAX_DISABLE_DEFER_SECONDS (%ds)',
-                        plugin_name, MAX_DISABLE_DEFER_SECONDS))
+                    log(string.format('forcing disable of %s — exceeded disable defer cap (%ds)',
+                        plugin_name, cap))
                     force = true
                 end
                 if not force and entry.disable_when and not entry.disable_when() then
@@ -984,6 +1092,49 @@ function orchestrator.tick()
     -- call until the incoming quest has been visible for TELEPORT_INCOMING_SETTLE
     -- so warplan data reflects the new activity, and until Alfred finishes any
     -- loot/salvage work.
+
+    -- Shared "fire warplan teleport (or skip)" used both by the IDLE→ready
+    -- branch (when via-Temis preamble is unavailable) and by TEMIS_ALFRED on
+    -- exit. Decides between three outcomes:
+    --   * Task-only incoming (e.g. TurnIn_Rewards) — task drives its own nav,
+    --     so we just release the gate (state stays IDLE).
+    --   * arrived_when() already true — we're at the destination already, skip.
+    --   * Otherwise — fire warplan.teleport_to_activity() and enter TELEPORTING.
+    local function start_warplan_teleport(wants_, now_)
+        local task_only_incoming = next(wants_) == nil
+        local already_arrived = false
+        for _, entry in pairs(wants_) do
+            if type(entry.arrived_when) == 'function' and entry.arrived_when() then
+                already_arrived = true
+                break
+            end
+        end
+        if task_only_incoming then
+            log('teleport skipped — incoming is task-only (handles own navigation)')
+            teleport_transition.state = 'IDLE'
+        elseif already_arrived then
+            log('teleport skipped — quest actor present, already at destination')
+            teleport_transition.state = 'IDLE'
+        else
+            teleport_transition.state      = 'TELEPORTING'
+            teleport_transition.started_at = now_
+            if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
+                local snap_w = get_current_world()
+                teleport_transition.snap_world = snap_w and snap_w:get_name()
+                teleport_transition.snap_zone  = snap_w and snap_w:get_current_zone_name()
+                warplan.teleport_to_activity()
+                log(string.format(
+                    'warplan.teleport_to_activity() called — world=%s zone=%s check_in=%.1fs',
+                    tostring(teleport_transition.snap_world),
+                    tostring(teleport_transition.snap_zone),
+                    TELEPORT_CHECK_INTERVAL))
+            else
+                log('warplan.teleport_to_activity not available — skipping teleport')
+                teleport_transition.state = 'IDLE'
+            end
+        end
+    end
+
     if settings.use_teleport_transition
         and teleport_pending
         and teleport_transition.state == 'IDLE'
@@ -1009,8 +1160,16 @@ function orchestrator.tick()
         alfred_kick_if_needed()
         local alfred_done = alfred_idle()
 
+        -- Helltide combat hold: when teleporting out of a helltide zone, the
+        -- channel is interrupted by any incoming damage. Wait for the rotation
+        -- plugin to clear nearby enemies before firing teleport_to_activity().
+        -- Gated on has_helltide_buff() so town-to-town handoffs (Pit/Undercity)
+        -- aren't affected — the player is in town, no enemies, no-op.
+        local in_helltide_combat = has_helltide_buff() and enemies_near_player()
+
         local has_pending = next(pending_disable) ~= nil
-        local ready = has_incoming and incoming_settled and alfred_done and not has_pending
+        local ready = has_incoming and incoming_settled and alfred_done
+            and not has_pending and not in_helltide_combat
         if not ready then
             local reason
             if not has_incoming then
@@ -1020,6 +1179,8 @@ function orchestrator.tick()
                 reason = 'waiting for ' .. tostring(pname) .. ' to finish (deferred disable)'
             elseif not alfred_done then
                 reason = 'Alfred busy (loot/salvage in progress)'
+            elseif in_helltide_combat then
+                reason = 'in helltide combat — waiting for area to clear before teleport'
             else
                 local left = TELEPORT_INCOMING_SETTLE - (now - teleport_incoming_first_seen)
                 reason = string.format('settling incoming (%.1fs left)', left)
@@ -1032,46 +1193,82 @@ function orchestrator.tick()
             teleport_pending             = false
             teleport_incoming_first_seen = nil
             teleport_holding_logged      = false
-            -- Task entries (e.g. TurnIn_Rewards) manage their own navigation
-            -- via teleport_to_waypoint — they don't use warplan.teleport_to_activity().
-            -- If only a task matched (no plugin entry in wants), skip the
-            -- warplan teleport entirely so we don't loop on a zone that won't
-            -- change (e.g. TurnIn_Rewards while already in Temis).
-            local task_only_incoming = next(wants) == nil
-            -- If the incoming plugin's quest actor is already visible we are
-            -- already at the destination (e.g. in Temis for Pit/Undercity).
-            -- Calling warplan.teleport_to_activity() would be a no-op and the
-            -- world/zone snapshot would never change, causing an infinite retry.
-            local already_arrived = false
-            for _, entry in pairs(wants) do
-                if type(entry.arrived_when) == 'function' and entry.arrived_when() then
-                    already_arrived = true
-                    break
-                end
-            end
-            if task_only_incoming then
-                log('teleport skipped — incoming is task-only (handles own navigation)')
-                -- State stays IDLE; enable gate clears on the next tick.
-            elseif already_arrived then
-                log('teleport skipped — quest actor present, already at destination')
-                -- State stays IDLE; enable gate clears on the next tick.
-            else
-                teleport_transition.state    = 'TELEPORTING'
-                teleport_transition.started_at = now
-                if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
-                    local snap_w = get_current_world()
-                    teleport_transition.snap_world = snap_w and snap_w:get_name()
-                    teleport_transition.snap_zone  = snap_w and snap_w:get_current_zone_name()
-                    warplan.teleport_to_activity()
-                    log(string.format(
-                        'warplan.teleport_to_activity() called — world=%s zone=%s check_in=%.1fs',
-                        tostring(teleport_transition.snap_world),
-                        tostring(teleport_transition.snap_zone),
-                        TELEPORT_CHECK_INTERVAL))
+            -- Decide whether to begin the via-Temis-Alfred preamble. We always
+            -- want to detour through Temis + run Alfred between activities, EXCEPT
+            -- when teleport_to_waypoint isn't available on this host (then we
+            -- jump straight to the warplan-teleport / skip decision below).
+            local can_temis_detour = type(teleport_to_waypoint) == 'function'
+            if can_temis_detour and in_temis() then
+                -- Already in Temis: skip the waypoint hop and trigger Alfred now.
+                if alfred_trigger_now() then
+                    teleport_transition.state           = 'TEMIS_ALFRED'
+                    teleport_transition.started_at      = now
+                    teleport_transition.alfred_fired_at = now
+                    teleport_transition.alfred_was_busy = false
+                    log('via-Temis preamble: already in Temis — Alfred triggered')
                 else
-                    log('warplan.teleport_to_activity not available — skipping teleport')
+                    -- Alfred not loaded/enabled — go straight to the warplan
+                    -- teleport / skip decision (start_warplan_teleport below).
+                    log('via-Temis preamble: Alfred not loaded/enabled — skipping Alfred step')
+                    start_warplan_teleport(wants, now)
                 end
+            elseif can_temis_detour then
+                if (now - teleport_transition.last_temis_tp) >= TEMIS_TELEPORT_DEBOUNCE then
+                    teleport_to_waypoint(TEMIS_WP)
+                    teleport_transition.last_temis_tp = now
+                end
+                teleport_transition.state      = 'TO_TEMIS'
+                teleport_transition.started_at = now
+                log('via-Temis preamble: teleport_to_waypoint(Temis) sent')
+            else
+                -- No teleport_to_waypoint on this host — fall back to the original
+                -- behaviour (warplan teleport directly or skip).
+                start_warplan_teleport(wants, now)
             end
+        end
+    end
+    if teleport_transition.state == 'TO_TEMIS' then
+        if in_temis() then
+            if alfred_trigger_now() then
+                teleport_transition.state           = 'TEMIS_ALFRED'
+                teleport_transition.started_at      = now
+                teleport_transition.alfred_fired_at = now
+                teleport_transition.alfred_was_busy = false
+                log('via-Temis preamble: arrived in Temis — Alfred triggered')
+            else
+                log('via-Temis preamble: arrived in Temis, Alfred not loaded/enabled — proceeding to warplan teleport')
+                start_warplan_teleport(wants, now)
+            end
+        elseif (now - teleport_transition.started_at) >= TEMIS_TELEPORT_TIMEOUT then
+            if (now - teleport_transition.last_temis_tp) >= TEMIS_TELEPORT_DEBOUNCE then
+                log('via-Temis preamble: TO_TEMIS timeout — retrying waypoint')
+                teleport_to_waypoint(TEMIS_WP)
+                teleport_transition.last_temis_tp = now
+                teleport_transition.started_at    = now
+            end
+        end
+    end
+    if teleport_transition.state == 'TEMIS_ALFRED' then
+        local elapsed   = now - teleport_transition.alfred_fired_at
+        local busy_now  = not alfred_idle()
+        if busy_now then teleport_transition.alfred_was_busy = true end
+        local done = false
+        if teleport_transition.alfred_was_busy and not busy_now then
+            done = true
+            log('via-Temis preamble: Alfred finished its work')
+        elseif not teleport_transition.alfred_was_busy and elapsed >= ALFRED_GRACE_SECONDS then
+            done = true
+            log(string.format(
+                'via-Temis preamble: Alfred had nothing to do (%.1fs grace elapsed)', elapsed))
+        elseif elapsed >= ALFRED_MAX_SECONDS then
+            done = true
+            log(string.format(
+                'via-Temis preamble: Alfred max wait (%.0fs) exceeded — proceeding anyway', elapsed))
+        end
+        if done then
+            teleport_transition.alfred_fired_at = nil
+            teleport_transition.alfred_was_busy = false
+            start_warplan_teleport(wants, now)
         end
     end
     if teleport_transition.state == 'TELEPORTING' then
@@ -1225,10 +1422,13 @@ function orchestrator.release_all()
     teleport_pending             = false
     teleport_incoming_first_seen = nil
     teleport_holding_logged      = false
-    teleport_transition.state      = 'IDLE'
-    teleport_transition.started_at = -math.huge
-    teleport_transition.snap_world = nil
-    teleport_transition.snap_zone  = nil
+    teleport_transition.state           = 'IDLE'
+    teleport_transition.started_at      = -math.huge
+    teleport_transition.snap_world      = nil
+    teleport_transition.snap_zone       = nil
+    teleport_transition.last_temis_tp   = -math.huge
+    teleport_transition.alfred_fired_at = nil
+    teleport_transition.alfred_was_busy = false
     had_active_session       = false
     -- Filler-pit state — re-arm only after the next session sees a turn-in.
     turn_in_was_matched      = false
