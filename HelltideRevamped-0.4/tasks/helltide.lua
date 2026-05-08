@@ -141,6 +141,10 @@ local last_chest_interact_time = -math.huge -- ensures first interact fires imme
 -- the player off the loot pile.
 local CHEST_POST_OPEN_PAUSE = 3.0
 local last_chest_open_time  = -math.huge
+-- Cinder snapshot at interact time so we can verify success after the hold:
+-- if cinders dropped, the open went through; if unchanged, the channel was
+-- interrupted and we need to retry.
+local pre_interact_cinders  = nil
 
 -- Zone-exit recovery: when the player walks out of the helltide boundary
 -- we navigate back instead of letting search_helltide teleport away.
@@ -601,9 +605,17 @@ end
 -- Mark a chest as just-opened: stamps the post-open pause timer and pauses
 -- Batmobile so the player doesn't drift off the drops.  Execute() honors the
 -- timer at the top of its tick and short-circuits movement until it expires.
+-- Also stops any active long-path navigation: Batmobile's main_pulse drives
+-- navigator.update/move autonomously while long_path.navigating is true,
+-- which keeps repathing during our hold and pulls the player away from the
+-- chest (logzewx: pathfinding to (2975.5,-1289) every 100ms despite HR not
+-- calling bm_pulse — that's main_pulse driving long_path navigation).
 local function mark_chest_opened()
     last_chest_open_time = get_time_since_inject()
     if BatmobilePlugin then
+        if BatmobilePlugin.stop_long_path then
+            BatmobilePlugin.stop_long_path(plugin_label)
+        end
         BatmobilePlugin.pause(plugin_label)
         BatmobilePlugin.clear_target(plugin_label)
     end
@@ -1392,7 +1404,15 @@ local helltide_task = {
         if get_time_since_inject() - last_chest_open_time < CHEST_POST_OPEN_PAUSE then
             clear_movement()
             if BatmobilePlugin then
+                -- Defensive: stop_long_path every tick so a long-path session
+                -- left over from a prior remembered-chest navigation can't
+                -- keep driving Batmobile's autonomous main_pulse and pull
+                -- the player off the chest mid-channel.
+                if BatmobilePlugin.stop_long_path then
+                    BatmobilePlugin.stop_long_path(plugin_label)
+                end
                 BatmobilePlugin.pause(plugin_label)
+                BatmobilePlugin.clear_target(plugin_label)
             end
             return
         end
@@ -2164,6 +2184,7 @@ local helltide_task = {
             console.print("[HELLTIDE CHEST] No chest data, returning to patrol")
             found_chest = nil
             found_chest_position = nil
+            pre_interact_cinders = nil
             clear_movement()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
@@ -2177,6 +2198,7 @@ local helltide_task = {
             console.print(string.format("[HELLTIDE CHEST] %s too far (%.0f > %d), giving up", found_chest, dist_to_saved, WAYPOINT_MAX_DIST))
             found_chest = nil
             found_chest_position = nil
+            pre_interact_cinders = nil
             chest_stuck_reset()
             clear_movement()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
@@ -2209,6 +2231,7 @@ local helltide_task = {
             chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
             found_chest = nil
             found_chest_position = nil
+            pre_interact_cinders = nil
             chest_stuck_reset()
             clear_movement()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
@@ -2234,12 +2257,34 @@ local helltide_task = {
         -- Try to find the actual actor
         local chest = find_closest_target(found_chest)
         if chest then
+            -- Cinder-decrement check: if we snapshotted cinders at the last
+            -- interact and they've dropped, the chest opened (game charged us)
+            -- even if the actor briefly stays interactable for one more tick.
+            -- Catches cases where :is_interactable() lags by a frame.
+            if pre_interact_cinders ~= nil
+                and get_helltide_coin_cinders() < pre_interact_cinders
+            then
+                console.print(string.format(
+                    "[HELLTIDE CHEST] %s opened (cinders %d→%d) — holding %.1fs for loot",
+                    found_chest, pre_interact_cinders,
+                    get_helltide_coin_cinders(), CHEST_POST_OPEN_PAUSE))
+                pre_interact_cinders = nil
+                mark_chest_opened()
+                found_chest = nil
+                found_chest_position = nil
+                last_chest_interact_time = -math.huge
+                tracker.clear_key('chest_drop_time')
+                self.current_state = helltide_state.EXPLORE_HELLTIDE
+                return
+            end
+
             if not chest:is_interactable() then
                 -- Chest exists but is no longer interactable — it opened successfully.
                 -- Re-stamp the post-open pause from THIS moment (the actual open) so
                 -- the full CHEST_POST_OPEN_PAUSE window covers loot drop time, not
                 -- just whatever's left after the open animation.
                 console.print(string.format("[HELLTIDE CHEST] %s opened (no longer interactable) — holding %.1fs for loot", found_chest, CHEST_POST_OPEN_PAUSE))
+                pre_interact_cinders = nil
                 mark_chest_opened()
                 found_chest = nil
                 found_chest_position = nil
@@ -2256,10 +2301,16 @@ local helltide_task = {
                 -- Throttle interact calls so we don't restart the open animation timer.
                 -- Stay in MOVING_TO_HELLTIDE_CHEST until the chest becomes non-interactable
                 -- (opened) or disappears — handled by the paths below.
+                -- Cooldown lines up with CHEST_POST_OPEN_PAUSE (3s) + 1s buffer so
+                -- that if cinders didn't drop after the hold, the very next tick
+                -- past cooldown retries the interact (channel was interrupted).
                 local now = get_time_since_inject()
                 if now - last_chest_interact_time >= CHEST_INTERACT_COOLDOWN then
                     last_chest_interact_time = now
-                    console.print(string.format("[HELLTIDE CHEST] Interacting with %s", found_chest))
+                    pre_interact_cinders = get_helltide_coin_cinders()
+                    console.print(string.format(
+                        "[HELLTIDE CHEST] Interacting with %s (cinders=%d, will verify drop)",
+                        found_chest, pre_interact_cinders))
                     interact_object(chest)
                     mark_chest_opened()
                 end
@@ -2289,6 +2340,7 @@ local helltide_task = {
         tracker.clear_key('chest_drop_time')
         found_chest = nil
         found_chest_position = nil
+        pre_interact_cinders = nil
         clear_movement()
         self.current_state = helltide_state.EXPLORE_HELLTIDE
     end,
