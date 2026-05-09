@@ -4,21 +4,17 @@
 --  Phases:
 --    MAIN          → walk to EGB/Belial chest, interact
 --    WAIT_GONE     → wait for main chest to despawn (up to WAIT_GONE_SECS)
---                    if it never despawns = out of materials → stop
+--                    if it never despawns = out of keys/husks → stop
 --    WAIT_COMPLETE → brief pause to loot, then consume_run + reset for next cycle
 --
 --  Doom/seasonal "theme" chest was removed from D4 (2026-05-03 patch);
---  the entire THEME phase and S12_Prop_Theme_Chest_* logic is gone. For
---  material runs the EGB/boss chest IS the run-completion signal. For sigil
---  runs (no EGB chest) tasks/sigil_complete.lua drives the wrap-up via
---  enemy-cleared detection.
+--  the entire THEME phase and S12_Prop_Theme_Chest_* logic is gone. The
+--  EGB/boss chest IS the run-completion signal.
 -- ============================================================
 
 local utils     = require "core.utils"
 local tracker   = require "core.tracker"
 local rotation  = require "core.boss_rotation"
-local enums     = require "data.enums"
-local materials = require "core.materials"
 
 -- ---- Config ----
 local CHEST_INTERACT_COOLDOWN = 0.5  -- min seconds between EGB chest interact attempts
@@ -78,12 +74,6 @@ local function in_target_boss_zone()
     local boss = rotation.current()
     if not boss then return false end
     local zone = utils.get_zone()
-    if boss.run_type == "sigil" then
-        return zone:find("BloodyLair") ~= nil
-            or zone:find("S12_Boss")   ~= nil
-            or zone:find("Boss_WT")    ~= nil
-            or zone:find("Boss_Kehj")  ~= nil
-    end
     return zone:match(boss.zone_prefix) ~= nil
 end
 
@@ -129,12 +119,6 @@ function task.shouldExecute()
     -- Active mid-sequence
     if phase == "WAIT_GONE" or phase == "WAIT_COMPLETE" then
         return true
-    end
-    -- Sigil runs have no EGB chest and (with the doom chest removed) no chest
-    -- at all — sigil_complete drives wrap-up via enemy-cleared detection.
-    local boss = rotation.current()
-    if boss and boss.run_type == "sigil" then
-        return false
     end
     -- Trigger on EGB/boss chest visibility
     return find_egb_chest() ~= nil
@@ -195,32 +179,32 @@ function task.Execute()
 
         -- Chest still here after timeout
         no_despawn_count = no_despawn_count + 1
-        console.print(string.format("[Chest] Chest didn't despawn (%d/%d) – out of materials?",
+        console.print(string.format("[Chest] Chest didn't despawn (%d/%d) – out of keys/husks?",
             no_despawn_count, OUT_OF_MATS_RETRIES))
 
         if no_despawn_count >= OUT_OF_MATS_RETRIES then
             no_despawn_count = 0
             local boss = rotation.current()
 
-            -- Re-verify actual inventory before declaring out of materials.
+            -- Re-verify actual inventory before declaring out of keys/husks.
             -- Chest may have failed to despawn due to lag or a missed interact.
             -- BUT: external (orchestrator-injected) rotations are explicit
             -- one-shots — never extend the run from inventory, even if the
             -- chest is misbehaving. Otherwise the altar can re-fire.
-            if boss and boss.run_type == "material" and not rotation.external then
-                local actual = materials.scan()[boss.id] or 0
-                if actual > 0 then
+            if boss and not rotation.external then
+                rotation.resync_pools()
+                local tier = boss.key_tier or boss.run_type or "lair"
+                local has_stock = rotation.runs_for_tier(tier) > 0
+                if has_stock then
                     console.print(string.format(
-                        "[Chest] Chest still present but %d %s material(s) in inventory — retrying open.",
-                        actual, boss.label))
-                    boss.runs_remaining = actual
+                        "[Chest] Chest still present but inventory has %s stock for %s — retrying open.",
+                        tier, boss.label))
                     set_phase("MAIN")
                     return
                 end
             end
 
-            console.print("[Chest] Chest didn't despawn after retries — out of summoning materials, skipping.")
-            if boss then boss.runs_remaining = 0 end
+            console.print("[Chest] Chest didn't despawn after retries — out of required key/husks for this boss, skipping.")
             rotation.advance()
             tracker.reset_run()
             set_phase("IDLE")

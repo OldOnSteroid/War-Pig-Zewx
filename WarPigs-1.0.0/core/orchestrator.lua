@@ -49,6 +49,16 @@ local function alfred_idle()
         if s.need_trigger or s.inventory_full then return false end
         return true
     end
+    -- Queued-but-not-yet-picked-up: external.trigger_tasks() flips
+    -- external_trigger=true synchronously, but tracker.trigger_tasks doesn't
+    -- flip until Alfred's status task Execute runs (1+ ticks later). Treat
+    -- the queued state as busy so the TEMIS_ALFRED gate doesn't slip through
+    -- the window between trigger and pickup.
+    if s.external_trigger then return false end
+    -- need_trigger means Alfred itself thinks it has work to do (inventory
+    -- full, need repair, restock pending, etc.). If true and we're polling
+    -- in TEMIS, hold — Alfred's main_pulse will pick this up.
+    if s.need_trigger or s.inventory_full or s.need_repair then return false end
     -- trigger_tasks is the live "Alfred is processing its queue" flag —
     -- Alfred's status task sets it true when there's work pending and
     -- clears it when the queue completes. Don't use all_task_done here:
@@ -101,10 +111,18 @@ local TEMIS_TELEPORT_DEBOUNCE = 6.0           -- min gap between waypoint calls 
 -- Alfred dwell window. After firing trigger_tasks we need to give Alfred's main
 -- loop a beat to pick up the trigger and flip its busy/trigger_tasks flag —
 -- otherwise alfred_idle() returns true the instant we trigger and we leave the
--- state immediately. ALFRED_GRACE_SECONDS is the "if Alfred never went busy
--- there's nothing to do" timeout. ALFRED_MAX_SECONDS is the absolute safety cap.
-local ALFRED_GRACE_SECONDS    = 4.0
-local ALFRED_MAX_SECONDS      = 180.0
+-- state immediately. ALFRED_MIN_DWELL is a minimum hold (we never exit before
+-- this even if Alfred reports idle — covers slow main_pulse pickup).
+-- ALFRED_PICKUP_TIMEOUT is "Alfred's status task should have flipped
+-- external_trigger=false by now if it had nothing to do; if it did, exit."
+-- ALFRED_MAX_SECONDS is the absolute safety cap.
+-- POST_ALFRED_SETTLE_SECONDS is the belt-and-suspenders settle in IDLE before
+-- the warplan teleport fires — re-checks alfred_idle() to catch a re-armed
+-- mini-cycle and bounces back to TEMIS_ALFRED if needed.
+local ALFRED_MIN_DWELL              = 6.0
+local ALFRED_PICKUP_TIMEOUT         = 8.0
+local ALFRED_MAX_SECONDS            = 180.0
+local POST_ALFRED_SETTLE_SECONDS    = 3.0
 
 local function in_temis()
     local ok, w = pcall(function() return get_current_world() end)
@@ -129,17 +147,22 @@ local function alfred_trigger_now()
 end
 
 local teleport_transition = {
-    -- IDLE | TO_TEMIS | TEMIS_ALFRED | TELEPORTING
-    -- TO_TEMIS:     teleport_to_waypoint(TEMIS_WP) sent, waiting for arrival.
-    -- TEMIS_ALFRED: alfred_trigger_now() fired, waiting for Alfred to finish.
-    -- TELEPORTING:  warplan.teleport_to_activity() sent, waiting for confirmation.
-    state           = 'IDLE',
-    started_at      = -math.huge,
-    snap_world      = nil,  -- world name at the moment teleport was sent
-    snap_zone       = nil,  -- zone name at the moment teleport was sent
-    last_temis_tp   = -math.huge,  -- debounce for repeated TEMIS_WP calls
-    alfred_fired_at = nil,  -- time alfred_trigger_now() was called
-    alfred_was_busy = false, -- went busy at least once after trigger (saw work)
+    -- IDLE | TO_TEMIS | TEMIS_ALFRED | POST_ALFRED_SETTLE | TELEPORTING
+    -- TO_TEMIS:           teleport_to_waypoint(TEMIS_WP) sent, waiting for arrival.
+    -- TEMIS_ALFRED:       alfred_trigger_now() fired, waiting for Alfred to finish.
+    -- POST_ALFRED_SETTLE: Alfred reported done; re-check alfred_idle for a
+    --                     few seconds before firing warplan teleport. Bounces
+    --                     back to TEMIS_ALFRED if Alfred re-arms a mini-cycle.
+    -- TELEPORTING:        warplan.teleport_to_activity() sent, waiting for confirmation.
+    state             = 'IDLE',
+    started_at        = -math.huge,
+    snap_world        = nil,  -- world name at the moment teleport was sent
+    snap_zone         = nil,  -- zone name at the moment teleport was sent
+    last_temis_tp     = -math.huge,  -- debounce for repeated TEMIS_WP calls
+    alfred_fired_at   = nil,  -- time alfred_trigger_now() was called
+    alfred_was_busy   = false, -- went busy at least once after trigger (saw work)
+    alfred_picked_up  = false, -- saw external_trigger flip false (status task ran)
+    settle_started_at = nil,  -- entry time into POST_ALFRED_SETTLE
 }
 -- True when the teleport sequence still needs to start. Two trigger sources:
 --   * plugin_disable() — fires AFTER the previous activity's disable_when
@@ -772,13 +795,15 @@ function orchestrator.tick()
         if teleport_transition.state ~= 'IDLE' then
             log('died mid-transition (state=' .. teleport_transition.state ..
                 ') — re-arming teleport sequence for after respawn')
-            teleport_transition.state           = 'IDLE'
-            teleport_transition.started_at      = -math.huge
-            teleport_transition.alfred_fired_at = nil
-            teleport_transition.alfred_was_busy = false
-            teleport_pending                    = true
-            teleport_incoming_first_seen        = nil
-            teleport_holding_logged             = false
+            teleport_transition.state             = 'IDLE'
+            teleport_transition.started_at        = -math.huge
+            teleport_transition.alfred_fired_at   = nil
+            teleport_transition.alfred_was_busy   = false
+            teleport_transition.alfred_picked_up  = false
+            teleport_transition.settle_started_at = nil
+            teleport_pending                      = true
+            teleport_incoming_first_seen          = nil
+            teleport_holding_logged               = false
         elseif settings.use_teleport_transition and not teleport_pending then
             -- Death outside an active transition still likely cancelled any
             -- in-progress in-game teleport channel (common when a mob hits
@@ -1201,10 +1226,12 @@ function orchestrator.tick()
             if can_temis_detour and in_temis() then
                 -- Already in Temis: skip the waypoint hop and trigger Alfred now.
                 if alfred_trigger_now() then
-                    teleport_transition.state           = 'TEMIS_ALFRED'
-                    teleport_transition.started_at      = now
-                    teleport_transition.alfred_fired_at = now
-                    teleport_transition.alfred_was_busy = false
+                    teleport_transition.state             = 'TEMIS_ALFRED'
+                    teleport_transition.started_at        = now
+                    teleport_transition.alfred_fired_at   = now
+                    teleport_transition.alfred_was_busy   = false
+                    teleport_transition.alfred_picked_up  = false
+                    teleport_transition.settle_started_at = nil
                     log('via-Temis preamble: already in Temis — Alfred triggered')
                 else
                     -- Alfred not loaded/enabled — go straight to the warplan
@@ -1230,10 +1257,12 @@ function orchestrator.tick()
     if teleport_transition.state == 'TO_TEMIS' then
         if in_temis() then
             if alfred_trigger_now() then
-                teleport_transition.state           = 'TEMIS_ALFRED'
-                teleport_transition.started_at      = now
-                teleport_transition.alfred_fired_at = now
-                teleport_transition.alfred_was_busy = false
+                teleport_transition.state             = 'TEMIS_ALFRED'
+                teleport_transition.started_at        = now
+                teleport_transition.alfred_fired_at   = now
+                teleport_transition.alfred_was_busy   = false
+                teleport_transition.alfred_picked_up  = false
+                teleport_transition.settle_started_at = nil
                 log('via-Temis preamble: arrived in Temis — Alfred triggered')
             else
                 log('via-Temis preamble: arrived in Temis, Alfred not loaded/enabled — proceeding to warplan teleport')
@@ -1252,22 +1281,83 @@ function orchestrator.tick()
         local elapsed   = now - teleport_transition.alfred_fired_at
         local busy_now  = not alfred_idle()
         if busy_now then teleport_transition.alfred_was_busy = true end
+        -- Track external_trigger pickup edge: alfred_trigger_now() set
+        -- external_trigger=true; Alfred's status task clears it after the
+        -- cycle completes. Observing the clear means Alfred actually picked
+        -- up our trigger — distinguishes "didn't pick up yet" from "picked
+        -- up but had nothing to do".
+        local picked_up_now = false
+        do
+            local alfred = _G.AlfredTheButlerPlugin
+            if alfred and type(alfred.get_status) == 'function' then
+                local ok, s = pcall(alfred.get_status)
+                if ok and type(s) == 'table' and s.external_trigger == false then
+                    picked_up_now = true
+                end
+            end
+        end
+        if picked_up_now and teleport_transition.alfred_was_busy then
+            -- Already saw work AND status task cleared the trigger — clean done.
+            teleport_transition.alfred_picked_up = true
+        elseif picked_up_now and elapsed >= ALFRED_MIN_DWELL then
+            -- Status task ran, cleared trigger, and we never observed busy →
+            -- Alfred decided there was nothing to do. Honor min-dwell.
+            teleport_transition.alfred_picked_up = true
+        end
         local done = false
-        if teleport_transition.alfred_was_busy and not busy_now then
+        if elapsed < ALFRED_MIN_DWELL then
+            -- Hold until min dwell regardless of reported state — covers
+            -- slow main_pulse pickup window where alfred_idle() can flicker
+            -- true between trigger queue and status task Execute.
+        elseif teleport_transition.alfred_was_busy and not busy_now then
             done = true
             log('via-Temis preamble: Alfred finished its work')
-        elseif not teleport_transition.alfred_was_busy and elapsed >= ALFRED_GRACE_SECONDS then
+        elseif teleport_transition.alfred_picked_up and not busy_now then
+            done = true
+            log('via-Temis preamble: Alfred picked up trigger, no work pending')
+        elseif elapsed >= ALFRED_PICKUP_TIMEOUT
+            and not teleport_transition.alfred_was_busy
+            and not busy_now
+        then
             done = true
             log(string.format(
-                'via-Temis preamble: Alfred had nothing to do (%.1fs grace elapsed)', elapsed))
+                'via-Temis preamble: Alfred pickup timeout (%.1fs), proceeding', elapsed))
         elseif elapsed >= ALFRED_MAX_SECONDS then
             done = true
             log(string.format(
                 'via-Temis preamble: Alfred max wait (%.0fs) exceeded — proceeding anyway', elapsed))
         end
         if done then
-            teleport_transition.alfred_fired_at = nil
-            teleport_transition.alfred_was_busy = false
+            -- Bounce into POST_ALFRED_SETTLE rather than firing teleport
+            -- immediately. Re-checks alfred_idle for POST_ALFRED_SETTLE_SECONDS
+            -- and flips back to TEMIS_ALFRED if Alfred re-arms a mini-cycle.
+            teleport_transition.state             = 'POST_ALFRED_SETTLE'
+            teleport_transition.settle_started_at = now
+            log(string.format(
+                'via-Temis preamble: entering post-Alfred settle (%.1fs)',
+                POST_ALFRED_SETTLE_SECONDS))
+        end
+    end
+    if teleport_transition.state == 'POST_ALFRED_SETTLE' then
+        local settled = now - teleport_transition.settle_started_at
+        local busy_now = not alfred_idle()
+        if busy_now then
+            -- Alfred re-armed (e.g. inventory scan re-detected something).
+            -- Bounce back to TEMIS_ALFRED with a fresh dwell window.
+            log('via-Temis preamble: Alfred re-armed during settle — back to TEMIS_ALFRED')
+            teleport_transition.state             = 'TEMIS_ALFRED'
+            teleport_transition.alfred_fired_at   = now
+            teleport_transition.alfred_was_busy   = true  -- we just observed it busy
+            teleport_transition.alfred_picked_up  = false
+            teleport_transition.settle_started_at = nil
+        elseif settled >= POST_ALFRED_SETTLE_SECONDS then
+            log(string.format(
+                'via-Temis preamble: post-Alfred settle clear (%.1fs) — proceeding to warplan teleport',
+                settled))
+            teleport_transition.alfred_fired_at   = nil
+            teleport_transition.alfred_was_busy   = false
+            teleport_transition.alfred_picked_up  = false
+            teleport_transition.settle_started_at = nil
             start_warplan_teleport(wants, now)
         end
     end
@@ -1422,13 +1512,15 @@ function orchestrator.release_all()
     teleport_pending             = false
     teleport_incoming_first_seen = nil
     teleport_holding_logged      = false
-    teleport_transition.state           = 'IDLE'
-    teleport_transition.started_at      = -math.huge
-    teleport_transition.snap_world      = nil
-    teleport_transition.snap_zone       = nil
-    teleport_transition.last_temis_tp   = -math.huge
-    teleport_transition.alfred_fired_at = nil
-    teleport_transition.alfred_was_busy = false
+    teleport_transition.state             = 'IDLE'
+    teleport_transition.started_at        = -math.huge
+    teleport_transition.snap_world        = nil
+    teleport_transition.snap_zone         = nil
+    teleport_transition.last_temis_tp     = -math.huge
+    teleport_transition.alfred_fired_at   = nil
+    teleport_transition.alfred_was_busy   = false
+    teleport_transition.alfred_picked_up  = false
+    teleport_transition.settle_started_at = nil
     had_active_session       = false
     -- Filler-pit state — re-arm only after the next session sees a turn-in.
     turn_in_was_matched      = false

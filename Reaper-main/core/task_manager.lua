@@ -50,8 +50,7 @@ local task_files = {
     "navigate_to_boss", -- teleport + walk to entrance
     "interact_altar",   -- summon boss
     "kill_monsters",    -- fight
-    "open_chest",       -- open reward chest (must run before sigil_complete yields)
-    "sigil_complete",   -- detect sigil run clear, return to town, count run
+    "open_chest",       -- open reward chest
 }
 
 for _, f in ipairs(task_files) do

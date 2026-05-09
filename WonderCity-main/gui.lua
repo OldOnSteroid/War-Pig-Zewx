@@ -142,6 +142,7 @@ gui.elements = {
     batmobile_priority = combo_box:new(1, get_hash(plugin_label .. '_' .. 'batmobile_priority')),
 
     tribute_priority_tree = tree_node:new(1),
+    skip_tribute = create_checkbox(false, 'skip_tribute'),
 
     enable_bargains = create_checkbox(false, 'enable_bargains'),
     bargain_timeout = slider_int:new(3, 60, 10, get_hash(plugin_label .. '_' .. 'bargain_timeout')),
@@ -220,7 +221,8 @@ gui.render = function ()
         end
         gui.elements.use_custom_explorer:render('Use custom explorer', 'Use the WonderCity targeted explorer instead of Batmobile full-coverage (objective-first BFS)')
 
-        if gui.elements.tribute_priority_tree:push('Tribute Priority') then
+        gui.elements.skip_tribute:render('Skip tribute', 'When enabled, do not right-click a tribute on the inventory slot before opening the portal. Off by default.')
+        if not gui.elements.skip_tribute:get() and gui.elements.tribute_priority_tree:push('Tribute Priority') then
             render_menu_header('Set priority for each tribute (0 = skip, 1 = highest priority)')
             for i, tribute in ipairs(gui.tributes_data) do
                 gui.elements['tribute_priority_' .. i]:render(tribute.name, 'Priority for ' .. tribute.name .. ' (0 = skip)')

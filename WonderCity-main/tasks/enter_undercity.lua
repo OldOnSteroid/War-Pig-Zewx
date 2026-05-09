@@ -207,6 +207,11 @@ local run_steps = function ()
     -- evaluate the action against whatever the cursor was over (often a
     -- world actor like an NPC), and the inventory item is never used.
     if task.step == STEP.TRIBUTE then
+        if settings.skip_tribute then
+            task.step = settings.enable_bargains and STEP.BARGAIN_OPEN or STEP.OPEN_PORTAL
+            task.status = status_enum['WAITING'] .. 'tribute (skipped)'
+            return
+        end
         local item, lp = pick_tribute()
         if item and lp then
             local slot = lp:get_item_slot_index(item, INV_CATEGORY_DUNGEON_KEYS)

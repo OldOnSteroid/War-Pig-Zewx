@@ -44,8 +44,15 @@ task.shouldExecute = function ()
     local status = {enabled = false}
     if AlfredTheButlerPlugin then
         status = AlfredTheButlerPlugin.get_status()
-        -- add additional conditions to trigger if required
+        -- Yield to Alfred whenever it's actively processing its queue,
+        -- regardless of who triggered it. WarPigs can externally trigger
+        -- Alfred for greater-affix gear (no need_trigger flag), and we
+        -- must not let lower-priority tasks (kill_monster, explore_pit,
+        -- enter_pit) pull Batmobile away while Alfred is mid-cycle.
+        local alfred_busy = status.enabled and not status.paused
+            and (status.trigger_tasks or status.external_trigger)
         if (status.enabled and status.need_trigger) or
+            alfred_busy or
             task.status == status_enum['WAITING'] or
             task.status == status_enum['LOOTING']
         then
@@ -57,6 +64,17 @@ end
 
 task.Execute = function ()
     BatmobilePlugin.pause(plugin_label)
+    -- If Alfred is busy from a different caller (e.g. WarPigs), hold
+    -- without re-triggering — re-trigger would overwrite the caller's
+    -- external_caller/callback and disrupt the orchestrator's handoff.
+    local status = AlfredTheButlerPlugin and AlfredTheButlerPlugin.get_status() or {}
+    if task.status == status_enum['IDLE']
+        and status.enabled and not status.paused
+        and (status.trigger_tasks or status.external_trigger)
+        and status.external_caller ~= plugin_label
+    then
+        return
+    end
     if task.status == status_enum['IDLE'] then
         if AlfredTheButlerPlugin then
             AlfredTheButlerPlugin.resume()

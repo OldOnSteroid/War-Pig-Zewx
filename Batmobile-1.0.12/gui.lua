@@ -60,6 +60,8 @@ gui.elements = {
     require_full_path_explore = create_checkbox(false, "require_full_path_explore"),
     explore_path_budget_ms = slider_int:new(50, 500, 150, get_hash(plugin_label .. '_explore_path_budget_ms')),
     path_smooth_step = slider_float:new(0.0, 10.0, 1.0, get_hash(plugin_label .. '_path_smooth_step')),
+    wall_path = create_checkbox(false, "wall_path"),
+    wall_path_dist = slider_float:new(0.5, 10.0, 4.0, get_hash(plugin_label .. '_wall_path_dist')),
     advanced_tree = tree_node:new(1),
     max_iteration = slider_int:new(250, 5000, 1500, get_hash(plugin_label .. '_' .. 'max_iteration')),
     debug_tree = tree_node:new(1),
@@ -119,6 +121,19 @@ function gui.render()
         '1.0-3.0 = normal range (default 1.0).\n' ..
         '3.0-10.0 = super smooth (very few LOS samples, longest straight segments).\n' ..
         'Raise if paths look jagged or the bot over-corrects; lower/disable if it clips small pillars.', 1)
+    gui.elements.wall_path:render('Wall path avoidance',
+        'Heavily penalize partial paths whose endpoint lands within N units of an unwalkable cell.\n' ..
+        'When the pathfinder cannot reach the goal and dumps the player against a wall/cliff,\n' ..
+        'this skips that partial path so the explorer picks a different frontier instead.\n' ..
+        'Only applies to explorer targets; custom targets (kill, chest, traversal) are unaffected.')
+    if gui.elements.wall_path:get() then
+        gui.elements.wall_path_dist:render('Wall path distance',
+            'How many units around the partial-path endpoint to scan for unwalkable cells.\n' ..
+            'Higher = more aggressive avoidance (rejects paths even with walls farther away).\n' ..
+            'Lower = only rejects paths that hug a wall closely.\n' ..
+            'Default 4.0; raise to 6-8 if the bot keeps wedging against ledges, lower if it refuses\n' ..
+            'legitimate frontiers near tight corridors.', 1)
+    end
     if gui.elements.debug_tree:push('Debug') then
         gui.elements.freeroam_keybind_toggle:render('Toggle explorer', 'enable freeroam explorer')
         render_menu_header('WARNING running explorer in overworld can cause big lag spike due to multiple elevation and traversals close by')

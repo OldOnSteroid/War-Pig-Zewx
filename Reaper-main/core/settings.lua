@@ -3,6 +3,8 @@
 -- ============================================================
 
 local gui      = require "gui"
+local enums    = require "data.enums"
+
 local settings = {
     enabled       = false,
     use_alfred    = true,
@@ -15,9 +17,16 @@ local settings = {
     town_zone     = gui.town_data[0].zone_name,
     town_waypoint = gui.town_data[0].waypoint_sno,
 
-    -- Run type toggles
-    run_materials = true,   -- consumable material runs
-    run_sigils    = true,   -- Bloodied + Bloodsoaked Lair Boss Sigil runs
+    -- Boss rotation:
+    --   boss_rotation_mode  = "manual" | "roundrobin" | "random"
+    --   boss_target         = boss_id used when rotation_mode == "manual"
+    --   boss_enabled        = per-boss toggles used by roundrobin / random
+    -- Defaults to roundrobin so a fresh install with multiple ticked bosses
+    -- cycles through them. Boss list defaults to all-off so nothing farms
+    -- until the user explicitly opts in.
+    boss_rotation_mode = "roundrobin",
+    boss_target        = "duriel",
+    boss_enabled       = {},
 
     dungeon_reset_enabled  = false,
     dungeon_reset_interval = 10,
@@ -28,12 +37,25 @@ local settings = {
         target_boss    = "duriel",
         pool           = {},
         party_delay    = 0,
+
+        -- Pixel coordinates at a 1920x1080 reference. Mirrors gui.elements.*.
+        -- Defaults match the previously hard-coded values.
+        show_crosshairs = false,
+        slot_x = 349,
+        slot_y = { 397, 495, 585, 683, 773, 875, 971 },
+        modify = { x = 349, y = 816 },
+        scroll = { x = 629, y = 858 },
+        open   = { x = 349, y = 956 },
     },
 
     _belial_current_target = nil,
-
-    manage_orbwalker = false,
 }
+
+-- Initialise boss_enabled with every defined boss so callers can iterate
+-- safely on the first frame even before the GUI pulse runs.
+for _, bd in ipairs(enums.boss_zones) do
+    settings.boss_enabled[bd.id] = false
+end
 
 function settings:update_settings()
     settings.enabled       = gui.elements.main_toggle:get()
@@ -45,15 +67,26 @@ function settings:update_settings()
     settings.town_zone    = town_data.zone_name
     settings.town_waypoint = town_data.waypoint_sno
 
-    settings.run_materials = gui.elements.run_materials:get()
-    settings.run_sigils    = gui.elements.run_sigils:get()
+    local rotation_modes = { "manual", "roundrobin", "random" }
+    settings.boss_rotation_mode =
+        rotation_modes[gui.elements.boss_rotation_mode:get() + 1] or "roundrobin"
+
+    local boss_ids = {}
+    for _, bd in ipairs(enums.boss_zones) do
+        boss_ids[#boss_ids + 1] = bd.id
+    end
+    settings.boss_target = boss_ids[gui.elements.boss_target:get() + 1] or "duriel"
+
+    for _, bd in ipairs(enums.boss_zones) do
+        local cb = gui.elements.boss_enabled[bd.id]
+        settings.boss_enabled[bd.id] = cb and cb:get() or false
+    end
 
     settings.dungeon_reset_enabled  = gui.elements.dungeon_reset_enabled:get()
     settings.dungeon_reset_interval = gui.elements.dungeon_reset_interval:get()
 
     settings.belial_chest_enabled = gui.elements.belial_chest_enabled:get()
 
-    local enums = require "data.enums"
     local modes = { "manual", "roundrobin", "random" }
     settings.belial_chest.selection_mode = modes[gui.elements.belial_sel_mode:get() + 1] or "manual"
 
@@ -72,19 +105,29 @@ function settings:update_settings()
     settings.belial_chest.pool        = pool
     settings.belial_chest.party_delay = gui.elements.belial_party_delay:get()
 
-    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
-end
-
-settings.orb_set_clear = function (v)
-    if settings.manage_orbwalker then
-        orbwalker.set_clear_toggle(v)
-    end
-end
-
-settings.orb_set_block = function (v)
-    if settings.manage_orbwalker then
-        orbwalker.set_block_movement(v)
-    end
+    settings.belial_chest.show_crosshairs = gui.elements.belial_show_xhairs:get()
+    settings.belial_chest.slot_x          = gui.elements.belial_slot_x:get()
+    settings.belial_chest.slot_y = {
+        gui.elements.belial_slot_y_1:get(),
+        gui.elements.belial_slot_y_2:get(),
+        gui.elements.belial_slot_y_3:get(),
+        gui.elements.belial_slot_y_4:get(),
+        gui.elements.belial_slot_y_5:get(),
+        gui.elements.belial_slot_y_6:get(),
+        gui.elements.belial_slot_y_7:get(),
+    }
+    settings.belial_chest.modify = {
+        x = gui.elements.belial_modify_x:get(),
+        y = gui.elements.belial_modify_y:get(),
+    }
+    settings.belial_chest.scroll = {
+        x = gui.elements.belial_scroll_x:get(),
+        y = gui.elements.belial_scroll_y:get(),
+    }
+    settings.belial_chest.open = {
+        x = gui.elements.belial_open_x:get(),
+        y = gui.elements.belial_open_y:get(),
+    }
 end
 
 return settings

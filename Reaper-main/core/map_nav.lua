@@ -37,7 +37,6 @@ local s = {
     t           = -999,
     boss_id     = nil,
     zone_prefix = nil,
-    is_sigil    = false,
     attempts    = 0,
 }
 
@@ -48,12 +47,6 @@ local function now() return get_time_since_inject() end
 
 local function in_boss_zone()
     local zone = get_current_world():get_current_zone_name()
-    if s.is_sigil then
-        return zone:find("BloodyLair") ~= nil
-            or zone:find("S12_Boss")   ~= nil
-            or zone:find("Boss_WT")    ~= nil
-            or zone:find("Boss_Kehj")  ~= nil
-    end
     if not s.zone_prefix or s.zone_prefix == "" then return false end
     return zone:match(s.zone_prefix) ~= nil
 end
@@ -80,10 +73,9 @@ end
 -- -------------------------------------------------------
 -- Public API
 -- -------------------------------------------------------
-function map_nav.start(boss_id, zone_prefix, is_sigil)
+function map_nav.start(boss_id, zone_prefix)
     s.boss_id     = boss_id
     s.zone_prefix = zone_prefix or ""
-    s.is_sigil    = is_sigil or false
     s.attempts    = 0
 
     if do_teleport() then

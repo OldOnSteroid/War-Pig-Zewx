@@ -28,18 +28,24 @@ enums.altar_names = {
 -- Belial is included for farming runs but excluded from
 -- the Belial chest boss-selection list (it's the host boss).
 -- harbinger and urivar are WT5 variants accessible via Belial chest.
+--
+-- key_tier  → which inventory item the boss's altar consumes per run:
+--               "lair"     = Lair Key          (sno 2556388 / 2558178)
+--               "greater"  = Greater Lair Key  (sno 2558255)
+--               "husk"     = Betrayer's Husk   (sno 2194099)
+--             Edit these to match your live game requirements.
 -- -------------------------------------------------------
 enums.boss_zones = {
-    { id="duriel",    zone_prefix="Boss_WT4_Duriel",         label="Duriel"              },
-    { id="andariel",  zone_prefix="Boss_WT4_Andariel",       label="Andariel"            },
-    { id="varshan",   zone_prefix="_Varshan",                 label="Varshan"             },
-    { id="grigoire",  zone_prefix="Boss_WT3_PenitentKnight", label="Grigoire"            },
-    { id="zir",       zone_prefix="Boss_WT4_S2VampireLord",  label="Lord Zir"            },
-    { id="beast",     zone_prefix="Boss_WT4_MegaDemon",      label="Beast in Ice"        },
-    { id="harbinger", zone_prefix="Boss_WT5_Harbinger",      label="Harbinger of Hatred" },
-    { id="urivar",    zone_prefix="Boss_WT5_Urivar",         label="Urivar"              },
-    { id="butcher",   zone_prefix="S12_Boss_Butcher",        label="Bloody Butcher"      },
-    { id="belial",    zone_prefix="Boss_Kehj_Belial",        label="Belial"              },
+    { id="duriel",    zone_prefix="Boss_WT4_Duriel",         label="Duriel",              key_tier="greater" },
+    { id="andariel",  zone_prefix="Boss_WT4_Andariel",       label="Andariel",            key_tier="greater" },
+    { id="varshan",   zone_prefix="_Varshan",                 label="Varshan",             key_tier="lair"    },
+    { id="grigoire",  zone_prefix="Boss_WT3_PenitentKnight", label="Grigoire",            key_tier="lair"    },
+    { id="zir",       zone_prefix="Boss_WT4_S2VampireLord",  label="Lord Zir",            key_tier="lair"    },
+    { id="beast",     zone_prefix="Boss_WT4_MegaDemon",      label="Beast in Ice",        key_tier="lair"    },
+    { id="harbinger", zone_prefix="Boss_WT5_Harbinger",      label="Harbinger of Hatred", key_tier="greater" },
+    { id="urivar",    zone_prefix="Boss_WT5_Urivar",         label="Urivar",              key_tier="lair"    },
+    { id="butcher",   zone_prefix="S12_Boss_Butcher",        label="Bloody Butcher",      key_tier="greater" },
+    { id="belial",    zone_prefix="Boss_Kehj_Belial",        label="Belial",              key_tier="husk"    },
 }
 
 -- Bosses selectable in the Belial chest UI (excludes Belial itself).

@@ -1,179 +1,164 @@
 -- ============================================================
 --  Reaper - core/materials.lua
 --
---  Scans inventory for boss summoning materials (consumables)
---  and Lair Boss Sigils (dungeon keys).
+--  Inventory scanner for the Lair Key boss-summoning system.
 --
---  Material costs per run:
---    Varshan            12x Malignant Heart    (1489420)
---    Grigoire           12x Living Steel       (1502128)
---    Beast in the Ice   12x Distilled Fear     (1518053)
---    Lord Zir           12x Exquisite Blood    (1522891)
---    Urivar             12x Judicator's Mask   (2193876)
---    Duriel              3x Shard of Agony     (1524924)
---    Andariel            3x Pincushioned Doll  (1812685)
---    Harbinger           3x Abhorrent Heart    (2194097)
---    Belial              2x Betrayer's Husk    (2194099)
+--    Lair Key          → standard tier; 1 per non-Belial run (mid-tier bosses)
+--    Greater Lair Key  → upgraded tier; 1 per non-Belial run (high-tier bosses)
+--    Betrayer's Husk   → Belial only; HUSK_COST_BELIAL per run
 --
---  Sigil SNO IDs:
---    Bloodied/Bloodsoaked Lair Boss Sigil  sno_id = 2565553 (0x2725B1)
+--  D4 ships two SNO IDs that are both rendered as "Lair Key"
+--  ("Initiate Lair Key" 2558178 and "Lair Key" 2556388). They are
+--  functionally the same item and are both counted toward the
+--  `lair_keys` pool.
+--
+--  SNO IDs cross-referenced against LooteerV3/data/items.lua:
+--    [2556388] Lair Key
+--    [2558178] Initiate Lair Key (treated as Lair Key)
+--    [2558255] Greater Lair Key
+--    [2194099] Betrayer's Husk
 -- ============================================================
 
 local materials = {}
 
 -- -------------------------------------------------------
--- Consumable materials
+-- SNO IDs (set any constant to 0 to exclude it from the pool)
 -- -------------------------------------------------------
-local BOSS_MATS = {
-    varshan   = { sno_id = 1489420, cost = 12 },  -- Malignant Heart
-    grigoire  = { sno_id = 1502128, cost = 12 },  -- Living Steel
-    beast     = { sno_id = 1518053, cost = 12 },  -- Distilled Fear
-    zir       = { sno_id = 1522891, cost = 12 },  -- Exquisite Blood
-    urivar    = { sno_id = 2193876, cost = 12 },  -- Judicator's Mask
-    duriel    = { sno_id = 1524924, cost =  3 },  -- Shard of Agony
-    andariel  = { sno_id = 1812685, cost =  3 },  -- Pincushioned Doll
-    harbinger = { sno_id = 2194097, cost =  3 },  -- Abhorrent Heart
-    belial    = { sno_id = 2194099, cost =  2 },  -- Betrayer's Husk
-    butcher   = { sno_id = 2553531, cost =  3 },  -- BossSummoning_Butcher
-}
+local LAIR_KEY_SNOS        = { 2556388, 2558178 }   -- "Lair Key" + "Initiate Lair Key"
+local GREATER_LAIR_KEY_SNO = 2558255                -- Greater Lair Key
+local HUSK_SNO             = 2194099                -- Betrayer's Husk (Belial)
 
--- -------------------------------------------------------
--- Sigil definitions
--- -------------------------------------------------------
-local SIGIL_SNO = 2565553  -- Bloodied + Bloodsoaked share the same SNO ID
+local HUSK_COST_BELIAL     = 2                      -- husks consumed per Belial run
 
--- Maps display name substrings → boss_id
-local SIGIL_DISPLAY_MAP = {
-    ["Hall of the Penitent"]  = "grigoire",
-    ["Glacial Fissure"]       = "beast",
-    ["Ancient's Seat"]        = "zir",
-    ["Palace of the Deceiver"]= "belial",
-    ["Hanged Man's Hall"]     = "andariel",
-    ["Malignant Burrow"]      = "varshan",
-    ["The Broiler"]           = "butcher",
-    ["Gaping Crevasse"]       = "duriel",
-    ["Fields of Judgement"]   = "urivar",
-    ["Harbinger's Den"]       = "harbinger",
-}
+-- Expose for other modules that need to know the cost
+materials.HUSK_COST_BELIAL     = HUSK_COST_BELIAL
+materials.LAIR_KEY_SNOS        = LAIR_KEY_SNOS
+materials.GREATER_LAIR_KEY_SNO = GREATER_LAIR_KEY_SNO
+materials.HUSK_SNO             = HUSK_SNO
 
 -- -------------------------------------------------------
 -- Helpers
 -- -------------------------------------------------------
-local function count_consumable(items, sno_id)
-    local total = 0
-    for _, item in pairs(items) do
-        if item:get_sno_id() == sno_id then
-            local n = item:get_stack_count()
-            total = total + (n > 0 and n or 1)
-        end
-    end
-    return total
+local function safe_count(item)
+    local ok, n = pcall(function() return item:get_stack_count() end)
+    if not ok or not n or n <= 0 then return 1 end
+    return n
 end
 
-local function boss_from_display(display)
-    if not display then return nil end
-    for substr, boss_id in pairs(SIGIL_DISPLAY_MAP) do
-        if display:find(substr, 1, true) then return boss_id end
-    end
-    return nil
-end
-
--- Public alias so other modules can use it
-materials.boss_from_display = boss_from_display
-
--- -------------------------------------------------------
--- Public: scan consumable materials from inventory
--- Returns { boss_id = run_count }
--- -------------------------------------------------------
-function materials.scan()
+local function get_dungeon_keys()
     local lp = get_local_player()
     if not lp then return {} end
+    local ok, keys = pcall(function() return lp:get_dungeon_key_items() end)
+    if not ok or type(keys) ~= "table" then return {} end
+    return keys
+end
 
-    local consumables = lp:get_consumable_items() or {}
-    local result = {}
-    for boss_id, mat in pairs(BOSS_MATS) do
-        local count = count_consumable(consumables, mat.sno_id)
-        result[boss_id] = math.floor(count / mat.cost)
+local function get_consumables()
+    local lp = get_local_player()
+    if not lp then return {} end
+    local ok, items = pcall(function() return lp:get_consumable_items() end)
+    if not ok or type(items) ~= "table" then return {} end
+    return items
+end
+
+local function is_lair_key_sno(sno)
+    for _, s in ipairs(LAIR_KEY_SNOS) do
+        if s ~= 0 and sno == s then return true end
     end
+    return false
+end
+
+-- -------------------------------------------------------
+-- Public: scan all relevant inventory
+-- Returns { lair_keys, greater_lair_keys, husks }
+-- Lair Keys can live in either dungeon_keys or consumables depending on
+-- the patch, so both inventories are searched.
+-- -------------------------------------------------------
+function materials.scan_keys()
+    local result = {
+        lair_keys         = 0,
+        greater_lair_keys = 0,
+        husks             = 0,
+    }
+
+    local function tally(items)
+        for _, item in ipairs(items) do
+            local ok, sno = pcall(function() return item:get_sno_id() end)
+            if ok and sno then
+                if is_lair_key_sno(sno) then
+                    result.lair_keys = result.lair_keys + safe_count(item)
+                elseif sno == GREATER_LAIR_KEY_SNO and GREATER_LAIR_KEY_SNO ~= 0 then
+                    result.greater_lair_keys = result.greater_lair_keys + safe_count(item)
+                elseif sno == HUSK_SNO then
+                    result.husks = result.husks + safe_count(item)
+                end
+            end
+        end
+    end
+
+    tally(get_dungeon_keys())
+    tally(get_consumables())
     return result
 end
 
--- -------------------------------------------------------
--- Public: check if inventory has any runs available
--- -------------------------------------------------------
+-- Total non-Belial runs available across both lair tiers.
+function materials.lair_runs_available()
+    local k = materials.scan_keys()
+    return k.lair_keys + k.greater_lair_keys
+end
+
+-- Number of Belial runs available from husks.
+function materials.belial_runs_available()
+    local k = materials.scan_keys()
+    return math.floor(k.husks / HUSK_COST_BELIAL)
+end
+
+-- True if any selected boss can run with the current inventory.
+-- Looks up each selected boss's required key tier in data/enums.lua and
+-- checks the matching pool — does NOT pool different tiers together.
 function materials.has_inventory_stock(settings)
-    if settings.run_materials then
-        local mats = materials.scan()
-        for _, v in pairs(mats) do
-            if v > 0 then return true end
-        end
-    end
-    if settings.run_sigils then
-        local sigs = materials.scan_sigils()
-        for k, v in pairs(sigs) do
-            if k ~= "unknown" and v > 0 then return true end
+    if not settings or not settings.boss_enabled then return false end
+    local enums = require "data.enums"
+    local k = materials.scan_keys()
+    for _, bd in ipairs(enums.boss_zones) do
+        if settings.boss_enabled[bd.id] then
+            local tier = bd.key_tier or "lair"
+            if tier == "husk"    and k.husks >= HUSK_COST_BELIAL then return true end
+            if tier == "lair"    and k.lair_keys          > 0    then return true end
+            if tier == "greater" and k.greater_lair_keys  > 0    then return true end
         end
     end
     return false
 end
 
 -- -------------------------------------------------------
--- Public: scan Lair Boss Sigils from dungeon key inventory
--- Returns { boss_id = count }
+-- Debug dumps
 -- -------------------------------------------------------
-function materials.scan_sigils()
-    local lp = get_local_player()
-    if not lp then return {} end
-
-    local ok, keys = pcall(function() return lp:get_dungeon_key_items() end)
-    if not ok or type(keys) ~= "table" then return {} end
-
-    local result = {}
-    for _, item in ipairs(keys) do
-        local ok_sno, sno = pcall(function() return item:get_sno_id() end)
-        if ok_sno and sno == SIGIL_SNO then
-            local ok_d, display = pcall(function() return item:get_display_name() end)
-            local boss_id = ok_d and boss_from_display(display) or nil
-            if boss_id then
-                result[boss_id] = (result[boss_id] or 0) + 1
-                console.print(string.format("[Reaper] Sigil found: '%s' → %s", tostring(display), boss_id))
-            else
-                result["unknown"] = (result["unknown"] or 0) + 1
-                console.print(string.format("[Reaper] Sigil UNMAPPED: '%s' (sno=0x%X) — add to SIGIL_DISPLAY_MAP",
-                    tostring(display), sno))
-            end
-        end
-    end
-    return result
-end
-
-function materials.print_summary()
-    local counts = materials.scan()
-    console.print("[Reaper] Material scan:")
-    for boss_id, runs in pairs(counts) do
-        console.print(string.format("  %-12s %d runs", boss_id, runs))
-    end
-end
-
-function materials.print_all_consumables()
-    local lp = get_local_player()
-    if not lp then console.print("[Reaper] print_all_consumables: no local player"); return end
-    local ok, items = pcall(function() return lp:get_consumable_items() end)
-    if not ok or type(items) ~= "table" then
-        console.print("[Reaper] print_all_consumables: could not read consumable items")
-        return
-    end
-    console.print(string.format("[Reaper] Consumable inventory (%d item slots):", #items))
+local function dump(label, items)
+    console.print(string.format("[Reaper] %s (%d items):", label, #items))
     for _, item in ipairs(items) do
-        local ok_sno,  sno   = pcall(function() return item:get_sno_id() end)
-        local ok_name, name  = pcall(function() return item:get_name() end)
-        local ok_disp, disp  = pcall(function() return item:get_display_name() end)
-        local ok_cnt,  cnt   = pcall(function() return item:get_stack_count() end)
+        local ok_sno, sno   = pcall(function() return item:get_sno_id() end)
+        local ok_name, name = pcall(function() return item:get_name() end)
+        local ok_disp, disp = pcall(function() return item:get_display_name() end)
+        local ok_cnt, cnt   = pcall(function() return item:get_stack_count() end)
         local sno_str  = ok_sno  and string.format("sno=%d (0x%X)", sno, sno) or "sno=?"
-        local name_str = ok_name and name  or (ok_disp and disp or "unknown")
+        local name_str = ok_name and name or (ok_disp and disp or "unknown")
         local cnt_str  = ok_cnt  and tostring(cnt > 0 and cnt or 1)            or "?"
         console.print(string.format("  [%s]  x%-4s  %s", sno_str, cnt_str, name_str))
     end
+end
+
+function materials.print_all_keys()
+    dump("dungeon_key_items", get_dungeon_keys())
+    dump("consumable_items",  get_consumables())
+end
+
+function materials.print_summary()
+    local k = materials.scan_keys()
+    console.print(string.format(
+        "[Reaper] Inventory: lair=%d  greater=%d  husks=%d  (Belial runs=%d, lair runs=%d)",
+        k.lair_keys, k.greater_lair_keys, k.husks,
+        materials.belial_runs_available(), materials.lair_runs_available()))
 end
 
 return materials

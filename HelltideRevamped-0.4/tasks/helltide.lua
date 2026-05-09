@@ -46,6 +46,7 @@ local CHEST_MICROPARTIAL_PLEN_MAX  = 2             -- plen at or below this coun
 -- Suppress the no-progress / micro-partial blacklisters in this radius so a
 -- monster interrupting the open animation doesn't wipe a reachable chest.
 local CHEST_INTERACT_RANGE         = 6             -- meters: treat as "in interaction"
+local CHEST_STUCK_COMBAT_RANGE     = 25            -- meters: refresh stuck window if a hostile is this close
 local _chest_stuck_key  = nil
 local _chest_stuck_t    = 0
 local _chest_stuck_dist = math.huge
@@ -176,6 +177,19 @@ local last_in_zone_pos      = nil    -- last confirmed in-zone position (used as
 -- on the first kill_monsters target, disarm on every fresh zone (re-)entry and on reset.
 local experimental_armed       = false
 local was_in_helltide_for_arm  = false  -- tracks the previous-tick is_in_helltide() value
+
+-- Override-zone end-of-helltide latch.  The walk-to-entry guard (see Execute)
+-- exists to drag the player to the helltide hot spot after WarPigs drops them
+-- in an override zone like Skov_Celestia without the buff yet.  But once the
+-- buff has been seen in that zone, a subsequent buff drop means the helltide
+-- *ended* there, not "haven't entered yet" — re-walking to entry sends us
+-- 4000+u to a dead zone and Batmobile stalls on a partial path while spike
+-- traps shred HP.  Latch the first buff sighting in the override zone; once
+-- set, suppress the entry-walk and let shouldExecute hand off to
+-- search_helltide so it can teleport us to town and find the next zone.
+-- Cleared whenever zone_overrides.get_current() returns nil (we left the
+-- override zone) and on plugin reset.
+local override_buff_seen       = false
 
 -- Trap-recovery escalation: when Batmobile signals giving_up (60s of trapped
 -- state with no escape), abandon this zone and let search_helltide pick a new
@@ -1342,7 +1356,12 @@ local helltide_task = {
         -- back to a known town and undo the WarPigs teleport.
         return utils.is_in_helltide()
             or (returning_to_helltide and utils.helltide_active())
-            or (zone_overrides.get_current() ~= nil and utils.helltide_active())
+            -- Override-zone clause: claim the tick before the buff lands so we
+            -- can walk to the entry vec3.  Once `override_buff_seen` latches,
+            -- a subsequent buff drop = helltide ended in this zone — release
+            -- the tick to search_helltide so it can TP to town and find the
+            -- next active helltide instead of looping on the entry walk.
+            or (zone_overrides.get_current() ~= nil and utils.helltide_active() and not override_buff_seen)
     end,
 
     Execute = function(self)
@@ -1388,7 +1407,19 @@ local helltide_task = {
             self._override_cache_time  = now
         end
         local override = self._override_cache
-        if override and not utils.is_in_helltide() then
+        -- Latch / clear: track buff sightings tied to the override zone so we
+        -- can distinguish "haven't entered yet" from "helltide ended here".
+        if override == nil then
+            override_buff_seen = false
+        elseif utils.is_in_helltide() then
+            override_buff_seen = true
+        end
+        -- Walk-to-entry guard: only fire on the *first* approach, before the
+        -- buff has ever been seen in this override zone.  Skipping it after
+        -- `override_buff_seen` lets buff-drop fall through to the standard
+        -- left-zone / search_helltide flow instead of stalling on a 4 km
+        -- partial path back to the entry vec3.
+        if override and not utils.is_in_helltide() and not override_buff_seen then
             local lp_pos = lp and lp:get_position()
             local dist = lp_pos and lp_pos:dist_to(override.entry) or math.huge
             if dist > 5 then
@@ -1416,8 +1447,8 @@ local helltide_task = {
             end
             return
         end
-        -- Buff is up (or no override) — clear the walk-logged flag so a future
-        -- buff drop logs the next walk attempt cleanly.
+        -- Buff is up, no override, or helltide ended here (latch tripped) —
+        -- clear the walk-logged flag so a future override re-entry logs cleanly.
         self._override_walk_logged = false
 
         -- Post-chest-open hold: keep the player parked on the loot for
@@ -2349,17 +2380,26 @@ local helltide_task = {
             _chest_stuck_dist = dist_to_saved
         elseif dist_to_saved <= CHEST_STUCK_RANGE
                 and (now_t - _chest_stuck_t) >= CHEST_STUCK_WINDOW then
-            console.print(string.format(
-                "[HELLTIDE CHEST] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
-                found_chest, dist_to_saved, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
-            chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
-            found_chest = nil
-            found_chest_position = nil
-            pre_interact_cinders = nil
-            chest_stuck_reset()
-            clear_movement()
-            self.current_state = helltide_state.EXPLORE_HELLTIDE
-            return
+            local kt = get_kill_target()
+            if kt and utils.distance_to(kt) <= CHEST_STUCK_COMBAT_RANGE then
+                -- Combat near the player is blocking progress, not geometry.
+                -- Refresh the window so we don't blacklist a reachable chest
+                -- just because a monster intercepted us en route.
+                _chest_stuck_t    = now_t
+                _chest_stuck_dist = dist_to_saved
+            else
+                console.print(string.format(
+                    "[HELLTIDE CHEST] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
+                    found_chest, dist_to_saved, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
+                chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+                found_chest = nil
+                found_chest_position = nil
+                pre_interact_cinders = nil
+                chest_stuck_reset()
+                clear_movement()
+                self.current_state = helltide_state.EXPLORE_HELLTIDE
+                return
+            end
         end
 
         -- Throttled debug
@@ -2528,18 +2568,25 @@ local helltide_task = {
             _chest_stuck_dist = dist
         elseif dist <= CHEST_STUCK_RANGE
                 and (now_t - _chest_stuck_t) >= CHEST_STUCK_WINDOW then
-            console.print(string.format(
-                "[CHEST RECALL] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
-                entry.name, dist, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
-            chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
-            if has_batmobile and BatmobilePlugin.stop_long_path then
-                BatmobilePlugin.stop_long_path(plugin_label)
+            local kt = get_kill_target()
+            if kt and utils.distance_to(kt) <= CHEST_STUCK_COMBAT_RANGE then
+                -- Combat near the player is blocking progress, not geometry.
+                _chest_stuck_t    = now_t
+                _chest_stuck_dist = dist
+            else
+                console.print(string.format(
+                    "[CHEST RECALL] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
+                    entry.name, dist, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
+                chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                if has_batmobile and BatmobilePlugin.stop_long_path then
+                    BatmobilePlugin.stop_long_path(plugin_label)
+                end
+                clear_movement()
+                remembered_chest_target = nil
+                chest_stuck_reset()
+                self.current_state = helltide_state.EXPLORE_HELLTIDE
+                return
             end
-            clear_movement()
-            remembered_chest_target = nil
-            chest_stuck_reset()
-            self.current_state = helltide_state.EXPLORE_HELLTIDE
-            return
         end
 
         -- Micro-partial detector: pathfinder consistently returning a 2-node
@@ -3043,6 +3090,7 @@ local helltide_task = {
         last_in_zone_pos      = nil
         experimental_armed    = false
         was_in_helltide_for_arm = false
+        override_buff_seen    = false
         force_zone_change     = false
         no_waypoint_region    = false
         no_waypoint_logged_zone = nil

@@ -1,61 +1,48 @@
-# Reaper v1.1
+# Reaper v1.7
 
-Farms bosses in a configured rotation using materials and/or lair boss sigils from your inventory. Each successful chest open counts as one completed run. When a boss's run count hits zero the script moves to the next queued boss, and disables itself when all are done.
+Farms a user-selected set of bosses using **Lair Keys** / **Greater Lair Keys** (shared pool for all non-Belial bosses) and **Betrayer's Husks** (Belial). Each successful chest open consumes one item from the appropriate pool. When every selected boss is out of resources the script returns to town and disables itself.
 
 ## Requirements
 
 - An active combat / orbwalker script — Reaper handles navigation and interaction only.
-- **D4Assistant** (recommended) or the built-in map-click navigation (see below).
+- Optionally **BatmobilePlugin** for autonomous A\* navigation (auto-engages as a fallback when path files fail).
 - Optionally **Alfred** for inventory management between runs.
 
 ## Setup
 
 1. Drop the `Reaper` folder into your scripts directory.
 2. Open the in-game menu → **Reaper**.
-3. Under **Settings**, choose your run types (Materials, Sigils, or both).
-4. If using D4Assistant, enable **Use D4Assistant for teleport** (default on).
-5. If using built-in navigation, disable D4Assistant and calibrate **Boss Icon Alignment** (see below).
-6. Enable **Alfred** if you want automatic stash/repair between runs.
-7. Make sure your combat script is running.
-8. Click **Enable**.
+3. Under **Bosses to Farm**, pick a **Rotation Mode**:
+   - **Manual** — farm one specific boss (pick from the dropdown).
+   - **Round Robin** — cycle through ticked bosses, one run each.
+   - **Random** — pick a random ticked boss for every run.
+4. Under **Settings**, pick your home town and toggle Alfred / Batmobile as desired.
+5. Make sure your combat script is running.
+6. Click **Enable**.
 
-## Run Types
+On enable, Reaper dumps every dungeon-key and consumable item in the console (with SNO IDs and stack counts) so you can verify the constants in `core/materials.lua` if a future patch reshuffles the SNOs.
 
-| Type | Description |
-|---|---|
-| **Material Runs** | Consumes summoning materials (Shards of Agony, Living Steel, etc.) to summon and farm bosses. The script counts available materials at startup and farms each boss down to zero. |
-| **Lair Boss Sigils** | Uses Bloodied and Bloodsoaked Lair Boss Sigils from your dungeon key inventory. Each sigil teleports you into a boss lair, clears it, and returns to town. |
+## Item / Inventory Model
 
-Both run types can be enabled simultaneously. Material runs are queued first.
+Each boss requires a specific key tier — pools are tracked separately, not pooled:
 
-## Navigation Modes
+| Item | SNO | Used by |
+|---|---|---|
+| **Lair Key** | `2556388` / `2558178` | Varshan, Grigoire, Lord Zir, Beast in Ice, Urivar |
+| **Greater Lair Key** | `2558255` | Duriel, Andariel, Bloody Butcher, Harbinger of Hatred |
+| **Betrayer's Husk** | `2194099` | Belial — `HUSK_COST_BELIAL` (default 2) per run |
 
-### D4Assistant (default)
-Reaper writes a teleport command to `command.txt` and waits for D4Assistant to move you to the boss zone. No calibration needed.
+The two Lair Key SNOs (regular + Initiate) are functionally the same item and both feed the Lair Key pool.
 
-### Built-in Map Navigation (D4Assistant disabled)
-Reaper navigates to the boss using the in-game waypoint map:
+Each boss's required key is set by its `key_tier` field in `data/enums.lua`. Edit that file to change which tier a boss expects. A boss is removed from the rotation when its required tier hits zero, regardless of whether other tiers still have stock.
 
-1. Teleports to the anchor waypoint (Nevesk for most bosses, Zarbinzet for Urivar / Harbinger).
-2. Walks to the Waypoint stone and interacts with it to open the map.
-3. Clicks the boss icon on the map, then clicks Accept.
-4. Waits up to 15 seconds for the boss zone to load. Retries from the anchor on failure.
+## Navigation
 
-Calibrate click positions under **Boss Icon Alignment** before use (see below).
+Reaper teleports directly to each boss dungeon via the runtime API call `teleport_to_boss_dungeon(sno)` — no map clicks, no `command.txt`, no external assistant required. From the dungeon entrance:
 
-## Boss Icon Alignment (built-in navigation only)
-
-All coordinates are **screen pixels** measured from the top-left of your display.
-Supported resolutions up to **5120×2160** (4K ultrawide).
-
-1. Open the in-game menu → **Reaper** → **Boss Icon Alignment**.
-2. Enable **Show crosshairs on screen** — coloured crosshairs appear at each stored position.
-3. Open the in-game world map and zoom to where all boss icons are visible.
-4. For each boss, expand its entry, adjust X and Y until the crosshair sits on the icon.
-5. Set the **Accept Button** X/Y to match the confirmation button that appears after clicking a boss.
-6. Disable **Show crosshairs** when done.
-
-> **Zir** requires two clicks: the gateway icon (Step 1) then the boss portal icon (Step 2). Both have separate sliders.
+1. **Path-file walk (default).** A pre-recorded waypoint file under `paths/<boss>_<variant>.lua` drives the player to the altar. Multiple variants are supported; Reaper picks the closest one to the player on entry.
+2. **Batmobile fallback (automatic).** If no path file exists, or a path-file walk completes without the altar in sight, Reaper auto-engages **BatmobilePlugin**'s `navigate_long_path` (uncapped A\*) the rest of the way. No toggle needed — it just works when Batmobile is loaded.
+3. **Use Batmobile Navigation toggle (optional).** Tick this in **Settings** to make Batmobile the primary nav everywhere, skipping path files. Useful when Blizzard reshuffles dungeon layouts and the recorded paths drift.
 
 ## Belial Chest Automation
 
@@ -69,35 +56,42 @@ After Belial dies a "Ritual of Lies – Choose Reward" chest UI appears. This se
 | **Boss Pool** *(RR / Random)* | Which bosses to include in the pool |
 | **Party Delay** | Extra ms before clicking Open (helps sync with party members) |
 
-**Click sequence:**
-1. Detects the Ritual of Lies chest via actor scan.
-2. Clicks **Modify Reward** (skipped for Andariel, which is the default selection).
-3. Scrolls if needed (Varshan requires a scroll).
-4. Clicks the target boss button.
-5. Waits for the party delay, then clicks **Open**.
+### Chest Dialog Alignment
+
+The "Choose Reward" dialog can't be inspected through any plugin API — Reaper interacts with it by injecting mouse clicks at known positions. Coordinates are stored as **pixels at a 1920x1080 reference resolution** and converted at click time using **center-aware scaling** (`screen_w/2 + (ref_x − 960) × screen_h/1080`), so 21:9 / 32:9 ultrawide displays don't drift. Tune the positions under **Belial Chest Automation → Chest Dialog Alignment**:
+
+1. Tick **Show crosshairs on screen**. Coloured `+` marks appear at every stored position even when the farmer is disabled.
+2. Kill Belial (or trigger the dialog any way you like) so the Ritual of Lies UI is on screen.
+3. Adjust the `Slot Y1`–`Slot Y7` sliders so the white crosshairs land on each boss row in the list.
+4. Adjust **Slot X (column)** so the crosshairs sit on the boss button, not next to it.
+5. Adjust **Modify Reward**, **Scroll**, and **Open** X/Y so each coloured crosshair sits on the matching button.
+6. Untick **Show crosshairs** when done.
+
+Defaults match the values that were hard-coded in earlier versions; you only need to recalibrate if a game patch reshuffles the dialog layout, or if you run an unusual aspect ratio where the `screen_h/1080` scaling alone is insufficient.
 
 ## Dungeon Reset
 
-Resets all dungeons after every N completed runs (configurable). Useful for keeping sigil dungeon layouts fresh.
+Resets all dungeons after every N completed runs (configurable). Useful for keeping dungeon layouts fresh.
 
 ## Combat Behaviour
 
-During boss fights Reaper keeps the player within **15 units of the altar/anchor position**. If the player drifts further away (e.g. chasing a stray enemy), it walks back before re-engaging. Suppressor orbs are always chased regardless of distance since they need to be burst to unblock combat.
+During boss fights Reaper keeps the player within **15 units of the altar/anchor position**. If the player drifts further away (e.g. chasing a stray enemy), it walks back before re-engaging. Suppressor orbs are always chased regardless of distance.
 
 ## Settings Reference
 
 | Setting | Default | Description |
 |---|---|---|
-| Use D4Assistant | On | Delegate teleports to D4Assistant via `command.txt` |
-| Use Alfred | On | Hand off inventory/repair/restock to Alfred |
-| Run Material Runs | On | Farm bosses using consumable materials |
-| Run Lair Boss Sigils | On | Farm bosses using lair sigils |
-| Dungeon Reset | Off | Reset dungeons every N runs |
-| Dungeon Reset Interval | 10 | Runs between dungeon resets |
+| Home town | Temis | Town to return to between runs (matches Alfred / Arkham). |
+| Use Alfred | On | Hand off inventory/repair/restock to Alfred between runs. |
+| Use Batmobile Navigation | Off | Force Batmobile as the primary navigation. When off, path files run first and Batmobile auto-engages on failure. |
+| Bosses to Farm | All off | Per-boss checkboxes (Round Robin / Random) or single boss dropdown (Manual). |
+| Rotation Mode | Round Robin | Manual / Round Robin / Random — how the script cycles through ticked bosses. |
+| Dungeon Reset | Off | Reset dungeons every N runs. |
+| Dungeon Reset Interval | 10 | Runs between dungeon resets. |
 
 ## Notes
 
-- Run counts and inventory are scanned once at enable time. Re-enable to refresh.
-- If a sigil boss zone is not reached within 60 seconds the script retries up to 5 times, then skips that boss.
-- If the built-in map navigation fails to reach the boss zone after 3 retries it gives up and the outer task manager attempts again on the next cycle.
+- Inventory is scanned once at enable time. Re-enable to refresh.
+- If the EGB / boss chest fails to despawn after several interact attempts, Reaper re-scans inventory: if stock remains the run retries; otherwise the boss is skipped.
+- If the boss-dungeon teleport fails to reach the target zone after 3 retries it gives up and the outer task manager attempts again on the next cycle.
 - Paths from your zone entrance to the altar are stored in `paths/<boss>_<variant>.lua`. Multiple variants are supported and the closest one is picked at runtime.

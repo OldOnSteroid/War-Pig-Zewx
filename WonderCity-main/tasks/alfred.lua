@@ -44,9 +44,21 @@ task.shouldExecute = function ()
     local status = {enabled = false}
     if AlfredTheButlerPlugin then
         status = AlfredTheButlerPlugin.get_status()
-        -- add additional conditions to trigger if required
+        -- Yield to Alfred whenever it's actively processing its queue,
+        -- regardless of who triggered it. Without this, walk_kurast (and
+        -- other lower-priority tasks) win priority and pull Batmobile
+        -- away from the stash/salvage NPCs while Alfred is mid-cycle —
+        -- Alfred only sets `need_trigger` on full-inventory/repair, but
+        -- WarPigs can trigger Alfred externally for greater-affix gear
+        -- with a non-full inventory. trigger_tasks is the live "queue
+        -- running" flag; external_trigger is the queued-but-not-yet-
+        -- picked-up window. Skip when paused (Alfred can't act paused;
+        -- yielding would deadlock against our own LOOTING state).
+        local alfred_busy = status.enabled and not status.paused
+            and (status.trigger_tasks or status.external_trigger)
         if task.status == status_enum['WAITING'] or
             task.status == status_enum['LOOTING'] or
+            alfred_busy or
             (status.enabled and status.need_trigger and
             ((not utils.player_in_undercity() and not utils.player_in_zone('[sno none]')) or
             (status.inventory_full and utils.player_in_undercity())))
@@ -59,6 +71,19 @@ end
 
 task.Execute = function ()
     BatmobilePlugin.pause(plugin_label)
+    -- If Alfred is busy from a DIFFERENT caller (e.g. WarPigs triggered it
+    -- between activities), just hold Batmobile paused — don't re-trigger,
+    -- which would overwrite external_caller/callback/teleport-flag and
+    -- disrupt the orchestrator's handoff. We resume on the next tick when
+    -- Alfred clears its queue (shouldExecute returns false).
+    local status = AlfredTheButlerPlugin and AlfredTheButlerPlugin.get_status() or {}
+    if task.status == status_enum['IDLE']
+        and status.enabled and not status.paused
+        and (status.trigger_tasks or status.external_trigger)
+        and status.external_caller ~= plugin_label
+    then
+        return
+    end
     if task.status == status_enum['IDLE'] then
         if AlfredTheButlerPlugin then
             AlfredTheButlerPlugin.resume()

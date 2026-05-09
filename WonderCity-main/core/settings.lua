@@ -27,6 +27,7 @@ local settings = {
     max_enticement = 4,
     batmobile_priority = 'distance',
     tribute_priorities = {},
+    skip_tribute = false,
     show_click_points = false,
     accept_button_x = 960,
     accept_button_y = 540,
@@ -93,6 +94,7 @@ settings.update_settings = function ()
     settings.use_custom_explorer = gui.elements.use_custom_explorer:get()
     settings.max_enticement = gui.elements.max_enticement:get()
     settings.batmobile_priority = gui.batmobile_priority[gui.elements.batmobile_priority:get()+1]
+    settings.skip_tribute = gui.elements.skip_tribute:get()
     settings.tribute_priorities = {}
     for i, tribute in ipairs(gui.tributes_data) do
         local p = gui.elements['tribute_priority_' .. i]:get()

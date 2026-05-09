@@ -33,36 +33,57 @@ local explorerlite = require "core.explorerlite"
 
 -- -------------------------------------------------------
 -- Screen-relative click helper
+--
+-- Reference coordinates are pixels at 1920x1080. The dialog scales with
+-- vertical resolution and stays centered horizontally, so the conversion
+-- to actual screen pixels is:
+--
+--   screen_x = screen_width/2 + (ref_x - 960)  * (screen_height / 1080)
+--   screen_y = ref_y * (screen_height / 1080)
+--
+-- This keeps clicks on-target for ultrawide (21:9 / 32:9) where naive
+-- ratio scaling would put them well to the left of the actual button.
 -- -------------------------------------------------------
-local function click(rx, ry)
-    local x = math.floor(get_screen_width()  * rx)
-    local y = math.floor(get_screen_height() * ry)
-    console.print(string.format("[BelialChest] click(%d, %d)", x, y))
-    utility.send_mouse_click(x, y)
+local REF_W, REF_H = 1920, 1080
+
+-- Resolve a 1920x1080 pixel coordinate to current-screen pixels.
+local function resolve(ref_x, ref_y)
+    local sw = get_screen_width()
+    local sh = get_screen_height()
+    local scale = sh / REF_H
+    local x = math.floor(sw / 2 + (ref_x - REF_W / 2) * scale)
+    local y = math.floor(ref_y * scale)
+    return x, y
 end
 
--- ── Click coordinates (pixel ratios @ 1920x1080, scaled to any res) ─────────
---
--- Slot Y-positions for the boss list.  The first six slots reuse the
--- coordinates that were measured for the OLD menu layout (those rows
--- still exist, the bosses occupying them just shifted around in the
--- new game version).  Slot 7 (~y=971) was extrapolated from the
--- ~96px row spacing of slots 1-6.
---
--- !!! TODO: verify slot 7 (y=971) and the page-2 assignments below
--- in-game.  If the visible row pixels shifted vs the old layout,
--- adjust the SLOT_Y values; the page mapping itself (which boss is on
--- which page) was provided by the operator and should be correct.
-local SLOT_Y = {
-    [1] =  397/1080,  -- (matches old: was 'duriel')
-    [2] =  495/1080,  -- (matches old: was 'grigoire')
-    [3] =  585/1080,  -- (matches old: was 'harbinger')
-    [4] =  683/1080,  -- (matches old: was 'zir')
-    [5] =  773/1080,  -- (matches old: was 'beast')
-    [6] =  875/1080,  -- (matches old: was 'urivar')
-    [7] =  971/1080,  -- TODO: verify (extrapolated)
-}
-local SLOT_X = 349/1920
+-- Public so the renderer can draw crosshairs at the same positions.
+local function ref_points(cfg)
+    cfg = cfg or settings.belial_chest or {}
+    local sx = cfg.slot_x or 349
+    local sy = cfg.slot_y or { 397, 495, 585, 683, 773, 875, 971 }
+    local mod = cfg.modify or { x = 349, y = 816 }
+    local scr = cfg.scroll or { x = 629, y = 858 }
+    local opn = cfg.open   or { x = 349, y = 956 }
+    return {
+        { label = "Modify", color = "yellow", x = mod.x, y = mod.y },
+        { label = "Scroll", color = "cyan",   x = scr.x, y = scr.y },
+        { label = "Open",   color = "green",  x = opn.x, y = opn.y },
+        { label = "Slot 1", color = "white",  x = sx, y = sy[1] or 0 },
+        { label = "Slot 2", color = "white",  x = sx, y = sy[2] or 0 },
+        { label = "Slot 3", color = "white",  x = sx, y = sy[3] or 0 },
+        { label = "Slot 4", color = "white",  x = sx, y = sy[4] or 0 },
+        { label = "Slot 5", color = "white",  x = sx, y = sy[5] or 0 },
+        { label = "Slot 6", color = "white",  x = sx, y = sy[6] or 0 },
+        { label = "Slot 7", color = "white",  x = sx, y = sy[7] or 0 },
+    }
+end
+
+local function click_at(ref_x, ref_y, label)
+    local x, y = resolve(ref_x, ref_y)
+    console.print(string.format("[BelialChest] click %s -> (%d, %d)",
+        label or "?", x, y))
+    utility.send_mouse_click(x, y)
+end
 
 -- Per-boss page + slot.  Page 1 = visible without scrolling; page 2 =
 -- visible after one Scroll click.  Bosses present on BOTH pages are
@@ -89,16 +110,27 @@ local function click_target(boss_id)
         console.print("[BelialChest] No click mapping for " .. tostring(boss_id))
         return
     end
-    click(SLOT_X, SLOT_Y[t.slot])
+    local cfg = settings.belial_chest or {}
+    local sx = cfg.slot_x or 349
+    local sy_table = cfg.slot_y or { 397, 495, 585, 683, 773, 875, 971 }
+    click_at(sx, sy_table[t.slot] or 0, "Slot " .. t.slot)
 end
 
--- Static dialog buttons (Open / Modify / Scroll).  Y-coords carried
--- over from the previous layout -- if these moved in the new game
--- version, update them here.
+-- Static dialog buttons (Open / Modify / Scroll). Sourced from
+-- settings.belial_chest so users can tune them in the GUI.
 local C = {
-    open   = function() click(349/1920, 956/1080) end,
-    modify = function() click(349/1920, 816/1080) end,
-    scroll = function() click(629/1920, 858/1080) end,
+    open   = function()
+        local p = (settings.belial_chest or {}).open or { x = 349, y = 956 }
+        click_at(p.x, p.y, "Open")
+    end,
+    modify = function()
+        local p = (settings.belial_chest or {}).modify or { x = 349, y = 816 }
+        click_at(p.x, p.y, "Modify")
+    end,
+    scroll = function()
+        local p = (settings.belial_chest or {}).scroll or { x = 629, y = 858 }
+        click_at(p.x, p.y, "Scroll")
+    end,
 }
 
 -- -------------------------------------------------------
@@ -352,5 +384,9 @@ function task.Execute()
         return
     end
 end
+
+-- Public helpers used by main.lua's calibration overlay.
+task.resolve_ref_to_screen = resolve
+task.get_ref_points        = ref_points
 
 return task

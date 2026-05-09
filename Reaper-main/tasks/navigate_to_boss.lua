@@ -1,7 +1,7 @@
 -- ============================================================
 --  Reaper - tasks/navigate_to_boss.lua
 --
---  Flow (material runs):
+--  Flow:
 --    MAP_NAV      → teleport_to_boss_dungeon via map_nav.lua
 --    PATHWALKING  → fire BatmobilePlugin.navigate_long_path to altar/seed
 --                   (if long path fails, falls back to path-file waypoints)
@@ -9,11 +9,7 @@
 --                   (on failure/timeout, falls back to path-file waypoints)
 --    WALKING      → walk to dungeon entrance portal
 --    ENTERING     → interact with portal to enter
---
---  Flow (sigil runs):
---    USE_SIGIL    → activate sigil item, confirm dialog
---    MAP_NAV      → navigate to boss dungeon via map_nav.lua
---    (then same PATHWALKING / LONG_PATHING)
+--    WAIT_EXIT    → waiting to leave once rotation completes
 --
 --  Batmobile BFS exploration is NEVER used.  When long path (uncapped A*)
 --  cannot find a route, we fall back to sequential path-file waypoints which
@@ -70,12 +66,6 @@ end
 -- -------------------------------------------------------
 local function in_target_zone(boss)
     local zone = utils.get_zone()
-    if boss.run_type == "sigil" then
-        return zone:find("BloodyLair") ~= nil
-            or zone:find("S12_Boss")   ~= nil
-            or zone:find("Boss_WT")    ~= nil
-            or zone:find("Boss_Kehj")  ~= nil
-    end
     return zone:match(boss.zone_prefix) ~= nil
 end
 
@@ -97,50 +87,17 @@ local function chest_visible()
 end
 
 -- -------------------------------------------------------
--- Sigil helpers
--- -------------------------------------------------------
-local SIGIL_SNO = 2565553
-
-local function find_sigil_for_boss(boss_id)
-    local lp = get_local_player()
-    if not lp then return nil end
-    local ok, keys = pcall(function() return lp:get_dungeon_key_items() end)
-    if not ok or type(keys) ~= "table" then return nil end
-
-    local mats = require "core.materials"
-    local first_sigil = nil
-
-    for _, item in ipairs(keys) do
-        local ok_sno, sno = pcall(function() return item:get_sno_id() end)
-        if ok_sno and sno == SIGIL_SNO then
-            if not first_sigil then first_sigil = item end
-
-            local ok_d, display = pcall(function() return item:get_display_name() end)
-            if ok_d and display then
-                local mapped = mats.boss_from_display(display)
-                if mapped == boss_id then
-                    return item
-                end
-            end
-        end
-    end
-
-    return first_sigil
-end
-
--- -------------------------------------------------------
 -- State machine
 -- -------------------------------------------------------
 local STATE = {
     IDLE         = "IDLE",
-    USE_SIGIL    = "USE_SIGIL",    -- activate sigil item, confirm dialog
     MAP_NAV      = "MAP_NAV",      -- teleport via map_nav.lua
     PATHWALKING  = "PATHWALKING",  -- Batmobile: retry navigate_long_path  |  pathwalker: walk path file
     LONG_PATHING = "LONG_PATHING", -- Batmobile driving navigation to altar
     TRAVERSAL    = "TRAVERSAL",    -- navigating to/crossing a traversal gizmo blocking the path
     WALKING      = "WALKING",      -- walk to dungeon entrance portal
     ENTERING     = "ENTERING",     -- interact with portal to enter
-    WAIT_EXIT    = "WAIT_EXIT",    -- waiting to leave completed sigil dungeon
+    WAIT_EXIT    = "WAIT_EXIT",    -- waiting to leave after rotation completes
 }
 
 local MAX_LONG_PATH_RETRIES   = 8
@@ -150,8 +107,6 @@ local TRAVERSAL_TRIGGER       = 1     -- long-path failures before searching for
 local TRAVERSAL_NAV_TIMEOUT   = 20.0  -- seconds before giving up on crossing a traversal
 local MAX_TRAVERSAL_ATTEMPTS  = 3     -- give up entirely after this many failed traversal attempts
 
-local T_CONFIRM      = 0.8    -- wait after use_item before confirming
-local T_SIGIL_SETTLE = 10.0   -- wait after arriving in Cerrigar before activating sigil
 local T_SETTLE       = 2.5
 local T_ENTER        = 15.0
 
@@ -177,10 +132,13 @@ local nav = {
     trav_start_pos      = nil,    -- player position when we started approaching traversal
     trav_got_close      = false,  -- true once player was within 3m of traversal
     trav_attempts       = 0,      -- how many traversal crossing attempts this run
+    -- Set when path-file walking fails (no path file, or path completes without
+    -- the altar in sight). Forces the Batmobile branch on subsequent pulses
+    -- even if settings.use_batmobile is false, so navigation has a fallback.
+    -- Cleared by reset_nav (i.e. once the boss room is reached and a fresh run
+    -- begins).
+    fallback_to_batmobile = false,
 }
-
--- Tracks when we first arrived in Cerrigar for the sigil settle timer
-local _sigil_settle_t = -999
 
 local function now() return get_time_since_inject() end
 local function set_state(s) nav.state = s; nav.phase_start = now() end
@@ -200,6 +158,7 @@ local function reset_nav()
     nav.trav_start_pos     = nil
     nav.trav_got_close     = false
     nav.trav_attempts      = 0
+    nav.fallback_to_batmobile = false
     map_nav.reset()
     pathwalker.stop_walking()
     if BatmobilePlugin then
@@ -254,7 +213,7 @@ end
 
 function task.shouldExecute()
     local boss = rotation.current()
-    -- If rotation is done and we're not in Cerrigar yet, run so Execute can teleport us out
+    -- If rotation is done and we're not in town yet, run so Execute can teleport us out
     if rotation.is_done() then
         return utils.get_zone() ~= settings.town_zone
     end
@@ -266,13 +225,7 @@ function task.shouldExecute()
         console.print("[Reaper] Post-revive: re-enabling path walk.")
     end
 
-    -- Reset settle timer whenever we leave Cerrigar (entered dungeon or zone changed)
-    if utils.get_zone() ~= settings.town_zone then
-        _sigil_settle_t = -999
-    end
-
     -- If we left the dungeon while mid-navigation, reset and yield this tick
-    -- so other tasks (sigil_complete WAIT_TOWN) can run first.
     local active_nav = nav.state == STATE.PATHWALKING
                     or nav.state == STATE.LONG_PATHING
     if active_nav and not in_target_zone(boss) then
@@ -284,24 +237,9 @@ function task.shouldExecute()
     -- Always run while map_nav is active
     if nav.state == STATE.MAP_NAV then return true end
 
-    -- In Cerrigar between sigil runs: yield to sigil_complete until the run
-    -- is counted (sigil_entry_t reset to -999), then apply a settle delay.
-    if nav.state == STATE.IDLE and boss.run_type == "sigil"
-            and utils.get_zone() == settings.town_zone then
-        -- sigil_entry_t > 0 means we're still in the old run; yield to sigil_complete
-        if tracker.sigil_entry_t > 0 then return false end
-        -- Run is reset. Start (or check) the settle timer.
-        if _sigil_settle_t < 0 then
-            _sigil_settle_t = now()
-            console.print(string.format("[Reaper] Run reset — waiting %.0fs before sigil.", T_SIGIL_SETTLE))
-        end
-        if (now() - _sigil_settle_t) < T_SIGIL_SETTLE then return false end
-        -- Settle complete — fall through to Execute to activate the sigil
-    end
-
     -- Block navigation only while INSIDE the boss zone with altar already activated.
     -- If we've left the zone (e.g. Alfred restocked mid-run), allow navigating back
-    -- so the run can be completed (EGB chest opened, reset_run called).
+    -- so the run can be completed (chest opened, reset_run called).
     if tracker.altar_activated and in_target_zone(boss) then return false end
     if in_target_zone(boss) and chest_visible() then return false end
     -- Altar visible inside the zone: reset any active navigation and yield to interact_altar.
@@ -320,27 +258,12 @@ function task.shouldExecute()
 
         if nav.state == STATE.IDLE or nav.state == STATE.PATHWALKING
                 or nav.state == STATE.LONG_PATHING or nav.state == STATE.TRAVERSAL then
-            -- After 60s in a sigil dungeon with no enemies, yield to sigil_complete
-            if boss.run_type == "sigil" and tracker.sigil_entry_t > 0
-                    and (now() - tracker.sigil_entry_t) >= 60.0 then
-                local has_enemy = utils.get_closest_enemy() ~= nil
-                               or utils.get_suppressor() ~= nil
-                if not has_enemy then
-                    return false  -- let sigil_complete handle the exit
-                end
-            end
             return true
         end
 
         if nav.state ~= STATE.IDLE then
-            -- Arrived via MAP_NAV/WALKING/ENTERING — reset and record entry time
-            local fresh = nav.state == STATE.MAP_NAV
-                       or nav.state == STATE.WALKING
-                       or nav.state == STATE.ENTERING
+            -- Arrived via MAP_NAV/WALKING/ENTERING — reset
             reset_nav()
-            if fresh and boss.run_type == "sigil" then
-                tracker.sigil_entry_t = now()
-            end
         end
         return false
     end
@@ -353,7 +276,7 @@ end
 -- Execute
 -- -------------------------------------------------------
 function task.Execute()
-    -- Rotation finished — get back to Cerrigar so main.lua can disable cleanly
+    -- Rotation finished — get back to town so main.lua can disable cleanly
     if rotation.is_done() then
         if utils.get_zone() ~= settings.town_zone then
             if nav.state ~= STATE.WAIT_EXIT then
@@ -377,14 +300,6 @@ function task.Execute()
 
         if in_target_zone(boss) then
             if utils.get_altar() ~= nil then reset_nav(); return end
-            -- Stale sigil dungeon: sigil_entry_t expired with no altar found
-            if boss.run_type == "sigil" and tracker.sigil_entry_t > 0
-                    and (now() - tracker.sigil_entry_t) > 60.0 then
-                console.print("[Reaper] Sigil zone with no altar and entry expired — stale dungeon, teleporting out.")
-                teleport_to_waypoint(settings.town_waypoint)
-                set_state(STATE.WAIT_EXIT)
-                return
-            end
             -- Use Batmobile to navigate to the altar area
             console.print("[Reaper] In zone — using Batmobile to navigate to altar area.")
             if BatmobilePlugin then
@@ -395,44 +310,10 @@ function task.Execute()
             return
         end
 
-        -- Sigil run: shouldExecute already enforced the settle delay — just activate
-        if boss.run_type == "sigil" then
-            if utils.get_zone() ~= settings.town_zone then return end
-            local sigil = find_sigil_for_boss(boss.id)
-            if not sigil then
-                console.print("[Reaper] No sigil found for " .. boss.label .. " — skipping.")
-                rotation.advance()
-                reset_nav()
-                return
-            end
-            console.print("[Reaper] Using sigil for " .. boss.label)
-            _sigil_settle_t = -999  -- clear so next return to Cerrigar gets a fresh settle
-            tracker.sigil_entry_t = now()
-            local ok, err = pcall(use_item, sigil)
-            if not ok then
-                console.print("[Reaper] use_item failed: " .. tostring(err))
-                tracker.sigil_entry_t = -999
-                reset_nav()
-                return
-            end
-            set_state(STATE.USE_SIGIL)
-            return
-        end
-
-        -- Material run: teleport via map_nav
-        map_nav.start(boss.id, boss.zone_prefix, false)
+        -- Teleport via map_nav for every boss — both Lair Key and Husk runs use
+        -- the boss-dungeon teleport.
+        map_nav.start(boss.id, boss.zone_prefix)
         set_state(STATE.MAP_NAV)
-        return
-    end
-
-    -- ---- USE_SIGIL: confirm dialog then navigate to boss dungeon ----
-    if nav.state == STATE.USE_SIGIL then
-        if (t - nav.phase_start) >= T_CONFIRM then
-            console.print("[Reaper] Confirming sigil notification...")
-            utility.confirm_sigil_notification()
-            map_nav.start(boss.id, boss.zone_prefix, true)
-            set_state(STATE.MAP_NAV)
-        end
         return
     end
 
@@ -443,9 +324,6 @@ function task.Execute()
         if map_nav.is_done() or in_target_zone(boss) then
             console.print("[Reaper] Arrived: " .. utils.get_zone())
             nav.attempts = 0
-            if boss.run_type == "sigil" then
-                tracker.sigil_entry_t = now()
-            end
             map_nav.reset()
             if BatmobilePlugin then
                 BatmobilePlugin.stop_long_path(plugin_label)
@@ -467,7 +345,7 @@ function task.Execute()
                 console.print("[Reaper] Giving up after " .. nav.max_attempts .. " attempts.")
                 reset_nav(); return
             end
-            map_nav.start(boss.id, boss.zone_prefix, boss.run_type == "sigil")
+            map_nav.start(boss.id, boss.zone_prefix)
         end
         return
     end
@@ -481,8 +359,13 @@ function task.Execute()
             return
         end
 
-        if settings.use_batmobile then
-            -- ---- Batmobile-ONLY branch ----
+        local use_batmobile = settings.use_batmobile or nav.fallback_to_batmobile
+        if use_batmobile then
+            -- ---- Batmobile branch ----
+            -- Used either because settings.use_batmobile is on, or because the
+            -- path-file branch already gave up on this boss this run. In the
+            -- fallback case BatmobilePlugin must be present (we checked before
+            -- setting the flag).
             -- Primary nav: navigate_long_path (uncapped A* to altar/seed).
             -- On failure: Batmobile standard nav (set_target/update/move) walks us
             -- closer for LONG_PATH_WAIT_FRAMES frames, then long path is retried.
@@ -555,7 +438,7 @@ function task.Execute()
 
             -- If we're already standing at the target and the altar isn't visible,
             -- the altar was activated and is now gone (e.g. Alfred reset tracker state
-            -- mid-run). Stop navigating — open_chest / sigil_complete will take over.
+            -- mid-run). Stop navigating — open_chest will take over.
             if utils.distance_to(target) <= 8.0 and not altar then
                 console.print("[Reaper] Already at altar position, no altar visible — yielding.")
                 reset_nav()
@@ -667,14 +550,38 @@ function task.Execute()
             local path = pick_best_path(variants)
             if path then
                 pathwalker.start_walking_path_with_points(path, boss.id)
+            elseif BatmobilePlugin then
+                console.print("[Reaper] No path file for " .. boss.id ..
+                    " — engaging Batmobile fallback.")
+                BatmobilePlugin.reset(plugin_label)
+                if BatmobilePlugin.clear_traversal_blacklist then
+                    BatmobilePlugin.clear_traversal_blacklist(plugin_label)
+                end
+                BatmobilePlugin.resume(plugin_label)
+                nav.fallback_to_batmobile = true
+                return  -- next pulse re-enters PATHWALKING via the Batmobile branch
             else
-                console.print("[Reaper] No path variants found for " .. boss.id .. " — skipping.")
+                console.print("[Reaper] No path file for " .. boss.id ..
+                    " and BatmobilePlugin unavailable — skipping.")
                 nav.path_exhausted = true
                 reset_nav()
                 return
             end
         end
         if pathwalker.is_path_completed() then
+            -- Path finished but altar still isn't in range — fall back to
+            -- Batmobile so navigation isn't dead-ended on a stale path file.
+            if not utils.get_altar() and BatmobilePlugin then
+                console.print("[Reaper] Path complete, altar not visible — engaging Batmobile fallback.")
+                pathwalker.stop_walking()
+                BatmobilePlugin.reset(plugin_label)
+                if BatmobilePlugin.clear_traversal_blacklist then
+                    BatmobilePlugin.clear_traversal_blacklist(plugin_label)
+                end
+                BatmobilePlugin.resume(plugin_label)
+                nav.fallback_to_batmobile = true
+                return
+            end
             console.print("[Reaper] Path complete.")
             pathwalker.stop_walking()
             reset_nav()
@@ -879,10 +786,10 @@ function task.Execute()
         return
     end
 
-    -- ---- WAIT_EXIT: waiting to leave a completed sigil dungeon ----
+    -- ---- WAIT_EXIT: waiting to leave after rotation completes ----
     if nav.state == STATE.WAIT_EXIT then
         if not in_target_zone(boss) then
-            console.print("[Reaper] Left completed dungeon — restarting run.")
+            console.print("[Reaper] Left dungeon — restarting run.")
             reset_nav()
             return
         end

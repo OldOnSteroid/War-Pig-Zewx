@@ -26,15 +26,24 @@ local function reset()
     task.status = status_enum['IDLE']
 end
 
+local function get_alfred_status()
+    if AlfredTheButlerPlugin then return AlfredTheButlerPlugin.get_status() end
+    if PLUGIN_alfred_the_butler then return PLUGIN_alfred_the_butler.get_status() end
+    return {enabled = false}
+end
+
 function task.shouldExecute()
+    local status = get_alfred_status()
+    -- Yield to Alfred whenever it's actively processing its queue,
+    -- regardless of who triggered it. Independent of settings.salvage —
+    -- WarPigs can externally trigger Alfred between activities, and we
+    -- must not let helltide / search_helltide pull movement away.
+    if status.enabled and not status.paused
+        and (status.trigger_tasks or status.external_trigger)
+    then
+        return true
+    end
     if settings.salvage then
-        local status = {enabled = false}
-        if AlfredTheButlerPlugin then
-            status = AlfredTheButlerPlugin.get_status()
-        elseif PLUGIN_alfred_the_butler then
-            status = PLUGIN_alfred_the_butler.get_status()
-        end
-        -- add additional conditions to trigger if required
         if (status.enabled and tracker.needs_salvage) or
             task.status == status_enum['WAITING']
         then
@@ -45,6 +54,17 @@ function task.shouldExecute()
 end
 
 function task.Execute()
+    -- If Alfred is busy from a different caller (e.g. WarPigs), hold
+    -- without re-triggering — re-trigger would overwrite the caller's
+    -- external_caller/callback and disrupt the orchestrator's handoff.
+    local status = get_alfred_status()
+    if task.status == status_enum['IDLE']
+        and status.enabled and not status.paused
+        and (status.trigger_tasks or status.external_trigger)
+        and status.external_caller ~= plugin_label
+    then
+        return
+    end
     if task.status == status_enum['IDLE'] then
         if AlfredTheButlerPlugin then
             AlfredTheButlerPlugin.resume()

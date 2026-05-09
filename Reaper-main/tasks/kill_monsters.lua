@@ -10,7 +10,6 @@ local utils    = require "core.utils"
 local tracker  = require "core.tracker"
 local rotation = require "core.boss_rotation"
 local enums    = require "data.enums"
-local settings = require "core.settings"
 
 local stuck_position = nil
 
@@ -18,12 +17,6 @@ local function in_target_boss_zone()
     local boss = rotation.current()
     if not boss then return false end
     local zone = utils.get_zone()
-    if boss.run_type == "sigil" then
-        return zone:find("BloodyLair") ~= nil
-            or zone:find("S12_Boss")   ~= nil
-            or zone:find("Boss_WT")    ~= nil
-            or zone:find("Boss_Kehj")  ~= nil
-    end
     return zone:match(boss.zone_prefix) ~= nil
 end
 
@@ -47,7 +40,7 @@ local ALTAR_TETHER = 15.0
 local task = { name = "Kill Monsters" }
 
 function task.reset()
-    settings.orb_set_clear(false)
+    orbwalker.set_clear_toggle(false)
 end
 
 function task.shouldExecute()
@@ -57,8 +50,8 @@ function task.shouldExecute()
 end
 
 function task.Execute()
-    settings.orb_set_clear(true)
-    settings.orb_set_block(true)
+    orbwalker.set_clear_toggle(true)
+    orbwalker.set_block_movement(true)
 
     -- Always chase suppressor orbs (need to burst them to unblock combat)
     local suppressor = utils.get_suppressor()

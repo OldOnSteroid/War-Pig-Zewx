@@ -16,10 +16,6 @@ local tracker = {
     belial_chest_interacted = false,  -- set when the physical Belial chest is interacted with
     just_revived            = false,  -- set by revive task, cleared by navigate_to_boss
 
-    -- sigil run coordination
-    sigil_entry_t    = -999,   -- get_time_since_inject() when dungeon was entered
-    -- (sigil_chest_done removed 2026-05-03 with Doom chest)
-
     -- session stats
     total_kills        = 0,
     current_boss_kills = 0,
@@ -35,7 +31,6 @@ function tracker.reset_run()
     tracker.start_time              = 0
     tracker.finished_time           = 0
     tracker.chest_opened_time       = nil
-    tracker.sigil_entry_t           = -999
 end
 
 function tracker.check_time(key, delay)

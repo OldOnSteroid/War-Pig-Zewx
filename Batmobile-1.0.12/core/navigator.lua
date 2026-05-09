@@ -1399,6 +1399,44 @@ navigator.move = function ()
             is_partial = false
         end
 
+        -- Wall-path avoidance: heavily penalize partial paths whose endpoint lands
+        -- near an unwalkable cell.  When A* gives up and the partial tail dumps the
+        -- player against a wall/cliff, we skip the path so the explorer picks a
+        -- different frontier instead of wedging us against the obstacle.
+        -- Same gating as require_full_path_explore — explorer targets only.
+        if is_partial and #result > 0
+            and settings.wall_path
+            and not navigator.is_custom_target
+            and navigator.last_trav == nil
+            and (navigator.trav_delay == nil or get_time_since_inject() > navigator.trav_delay)
+        then
+            local endpoint = result[#result]
+            local radius = settings.wall_path_dist or 4.0
+            -- Sample 16 angles at the slider radius around the endpoint.
+            -- If any sample is non-walkable, the endpoint is "near a wall".
+            -- 16 angles = 22.5° spacing, dense enough to catch thin walls without
+            -- being expensive (called only once per partial pathfind).
+            local near_wall = false
+            local ez = endpoint:z()
+            for i = 0, 15 do
+                local ang = (i / 16) * 2 * math.pi
+                local sx = endpoint:x() + math.cos(ang) * radius
+                local sy = endpoint:y() + math.sin(ang) * radius
+                local sample = vec3:new(sx, sy, ez)
+                if utils.get_valid_node(sample, ez) == nil then
+                    near_wall = true
+                    break
+                end
+            end
+            if near_wall then
+                console.print('[nav] PARTIAL PATH SKIPPED (wall_path endpoint within ' ..
+                    string.format('%.1f', radius) .. 'u of unwalkable; plen=' ..
+                    #result .. ' dist=' .. string.format('%.1f', dist_to_target) .. ')')
+                result = {}
+                is_partial = false
+            end
+        end
+
         -- Partial path: A* couldn't reach the goal but got closer.
         -- Walk the partial path to approach the destination (e.g. cliff edge near a
         -- traversal). Don't increment fail count — the path IS making progress.
