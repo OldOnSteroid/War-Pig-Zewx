@@ -2,9 +2,17 @@
 
 A curated plugin suite for Diablo IV that runs **War Plans** end-to-end. WarPigs is the master orchestrator: it watches your active War Plan quests and toggles the right sub-plugin for each activity. You play the meta-game — pick the plans you want to run — and WarPigs drives the rest.
 
-## Important: build your War Plan first
+## How a full cycle runs
 
-Before enabling WarPigs, **open the War Plan board in-game and queue the activities you want to run**. WarPigs only activates a plugin when its matching `WarPlans_QST_*` quest is active in your log.
+The suite is designed to run end-to-end without you ever opening the War Plan board:
+
+1. **WarPug** picks a War Plan path for you while you're idle in Temis. It uses the in-game `warplan` API to auto-select + confirm a tree, and rerolls (up to 10 attempts) when no NMD-free path exists. You don't have to touch the board.
+2. **WarPigs** watches the active `WarPlans_QST_*` quests and enables the right activity plugin (Pit / Helltides / Hordes / Boss Lairs / Undercity) for each step.
+3. After every activity (with **Use teleport** on), WarPigs detours through Temis, triggers Alfred for stash / salvage / repair, and waits until he's done before teleporting to the next quest.
+4. When the path finishes, WarPigs walks the **Turn-in** task automatically (teleports to Temis → approaches Tyrael → interacts).
+5. WarPug picks the next path. Loop forever.
+
+You *can* still build the path manually if you want — WarPigs only activates a plugin when its matching `WarPlans_QST_*` quest is in your log, regardless of whether you or WarPug queued it.
 
 Supported activity types:
 - **Helltides** (Tortured Gifts)
@@ -13,9 +21,7 @@ Supported activity types:
 - **Boss Lairs** (boss runs via Reaper)
 - **Kurast Undercity**
 
-> **Nightmare Dungeons are NOT supported.** If you queue an NMD War Plan, WarPigs will not pick it up — no plugin in this suite drives NMDs. Skip NMD plans when building your War Plan.
-
-The reward turn-in step (`WarPlans_QST_TurnIn_Rewards`) is handled internally — WarPigs teleports to Temis and walks to Tyrael for you.
+> **Nightmare Dungeons are NOT supported.** WarPug always excludes NMD nodes when picking paths, and WarPigs will not activate any plugin for an NMD WarPlan if one is queued manually — no plugin in this suite drives NMDs.
 
 ## What's in the suite
 
@@ -43,9 +49,9 @@ These are external prerequisites — install them separately into your scripts d
 1. Drop every folder in this repo into your scripts directory (alongside `Alfred`, `Looteer`, `Orbwalker`, etc.).
 2. Launch the game and load the framework.
 3. Open each sub-plugin's menu once and configure to taste (loot modes, exit timers, glyph upgrade thresholds, tribute order, Reaper boss selection + Belial chest alignment, WarPug reroll click capture, etc.). Sub-plugin docs are in each subfolder's `README.md`.
-4. **In-game**, open the War Plan board and queue plans for the supported activities listed above.
-5. Open `Z | War Pigs | Orchestrator` and tick **Enable**.
-6. Start your combat / orbwalker script if your queued plans need one.
+4. *(Optional)* Open `Z | War Pug | War Plan Creator`, capture the **Reroll** and **Confirm** click positions for your war plan vendor (hover the in-game button, press the bound keybind), then tick **Enable**. WarPug will pick a path for you any time you idle in Temis with no active WarPlans.
+5. Open `Z | War Pigs | Orchestrator` and tick **Enable**. With **Use teleport** on, WarPigs will run each WarPlan, detour through Temis for Alfred between activities, and turn in rewards automatically.
+6. Start your combat / orbwalker script.
 
 WarPigs takes over from there: it enables the correct sub-plugin while a War Plan quest is active, defers disabling during post-quest wrap-up windows (e.g. Arkham collecting the glyphstone reward), and force-disables every managed plugin when no plan is active so nothing is left running.
 
