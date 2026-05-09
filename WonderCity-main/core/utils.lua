@@ -44,7 +44,7 @@ utils.get_undercity_chest = function ()
     local actors = actors_manager:get_ally_actors()
     for _, actor in pairs(actors) do
         local actor_name = actor:get_skin_name()
-        if actor_name:match('X1_Undercity_Chest_Attunement') then
+        if actor_name and actor_name:match('X1_Undercity_Chest_Attunement') then
             return actor
         end
     end
@@ -67,7 +67,8 @@ utils.get_closest_enticement = function (ignore_interacted)
     for _, actor in pairs(actors) do
         local name = actor:get_skin_name()
         local found = false
-        if (name:match('X1_Undercity_Enticements_SpiritBeaconSwitch') or
+        if name and
+            (name:match('X1_Undercity_Enticements_SpiritBeaconSwitch') or
             (name:match('SpiritHearth_Switch') and
             utils.get_enticement_count() < settings.max_enticement))
         then

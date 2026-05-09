@@ -64,7 +64,7 @@ local is_in_boss_room = function ()
         local seen = {}
         for _, actor in pairs(actors_manager:get_all_actors()) do
             local name = actor:get_skin_name()
-            if not seen[name] then
+            if name and not seen[name] then
                 seen[name] = true
                 console.print('[WonderCity:portal] actor_scan | ' .. name)
             end

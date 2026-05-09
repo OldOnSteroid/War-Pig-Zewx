@@ -26,6 +26,14 @@ local MAX_DISABLE_DEFER_SECONDS = 120
 -- landed, otherwise we retry warplan.teleport_to_activity() and check again.
 local TELEPORT_CHECK_INTERVAL = 3.0
 
+-- Helltide chase: while we have the helltide buff and HelltideRevampedPlugin
+-- owns the run, re-fire warplan.teleport_to_activity() every interval to
+-- chase the next event spawn. Helltide events are wave-based — once a wave
+-- clears, HR doesn't always re-target the next event spot fast enough and
+-- the player stands idle. Gated to between-wave windows (no nearby enemies)
+-- so we don't interrupt the channel mid-fight.
+local HELLTIDE_CHASE_INTERVAL = 4.0
+
 -- Hold time AFTER the incoming activity first appears in the matched set.
 -- Stops us from pressing Tab the same tick the previous WarPlan unmatched —
 -- the next WarPlan (e.g. TurnIn) typically lands ~1 second later, and the
@@ -163,6 +171,7 @@ local teleport_transition = {
     alfred_was_busy   = false, -- went busy at least once after trigger (saw work)
     alfred_picked_up  = false, -- saw external_trigger flip false (status task ran)
     settle_started_at = nil,  -- entry time into POST_ALFRED_SETTLE
+    helltide_hold_logged = false, -- dedup for "holding for helltide off-window" log
 }
 -- True when the teleport sequence still needs to start. Two trigger sources:
 --   * plugin_disable() — fires AFTER the previous activity's disable_when
@@ -187,6 +196,10 @@ local teleport_holding_logged = false
 -- False until the first activity starts; switched true on first activation
 -- so cold-start fires exactly once. Reset by release_all().
 local had_active_session = false
+
+-- Last time the helltide-chase block fired warplan.teleport_to_activity().
+-- Paces the between-waves re-target so we don't spam the channel.
+local last_helltide_chase_at = -math.huge
 
 -- Scans all actors for a given skin name. Used by arrived_when predicates so
 -- the orchestrator can confirm "we are at the quest destination" without
@@ -233,6 +246,26 @@ local function has_helltide_buff()
     for _, buff in ipairs(buffs) do
         local ok2, hash = pcall(function() return buff.name_hash end)
         if ok2 and hash == HELLTIDE_BUFF_HASH then return true end
+    end
+    return false
+end
+
+-- Predicate: is helltide currently active in-world? Mirrors HelltideRevamped's
+-- `utils.helltide_active` (HelltideRevamped-0.4/core/utils.lua:139): minutes
+-- 55-59 of every hour are the off-window when no helltide exists. Used to
+-- hold the warplan teleport in POST_ALFRED_SETTLE when incoming is helltide
+-- and we'd otherwise teleport into a helltide that doesn't exist yet.
+local function helltide_active()
+    local m = tonumber(os.date('%M'))
+    if not m then return true end
+    if m >= 55 and m <= 59 then return false end
+    return true
+end
+
+-- Predicate: any wanted plugin in `wants_` is HelltideRevampedPlugin.
+local function incoming_is_helltide(wants_)
+    for _, entry in pairs(wants_) do
+        if entry.plugin == 'HelltideRevampedPlugin' then return true end
     end
     return false
 end
@@ -801,6 +834,7 @@ function orchestrator.tick()
             teleport_transition.alfred_was_busy   = false
             teleport_transition.alfred_picked_up  = false
             teleport_transition.settle_started_at = nil
+            teleport_transition.helltide_hold_logged = false
             teleport_pending                      = true
             teleport_incoming_first_seen          = nil
             teleport_holding_logged               = false
@@ -1183,7 +1217,13 @@ function orchestrator.tick()
         local incoming_settled = teleport_incoming_first_seen
             and (now - teleport_incoming_first_seen) >= TELEPORT_INCOMING_SETTLE
         alfred_kick_if_needed()
-        local alfred_done = alfred_idle()
+        -- Only block on Alfred when we're already in Temis (where it can
+        -- actually progress). Outside town, "Alfred busy" means Alfred wants
+        -- work — which is exactly what the via-Temis preamble is about to
+        -- enable. Gating on it here would deadlock us in the activity zone
+        -- (e.g. helltide ends with inventory_full set → Alfred can't run
+        -- outside town → gate never clears → no TP to town → forever).
+        local alfred_done = (not in_temis()) or alfred_idle()
 
         -- Helltide combat hold: when teleporting out of a helltide zone, the
         -- channel is interrupted by any incoming damage. Wait for the rotation
@@ -1350,7 +1390,24 @@ function orchestrator.tick()
             teleport_transition.alfred_was_busy   = true  -- we just observed it busy
             teleport_transition.alfred_picked_up  = false
             teleport_transition.settle_started_at = nil
+        elseif settled >= POST_ALFRED_SETTLE_SECONDS
+            and incoming_is_helltide(wants) and not helltide_active()
+        then
+            -- Helltide off-window (minute 55-59): no helltide exists for the
+            -- warplan teleport to land in. Stay parked in Temis with Alfred
+            -- already done — re-checks every tick, fires the teleport as soon
+            -- as the new helltide hour begins. We deliberately don't clear
+            -- settle_started_at so the busy_now branch above stays correct
+            -- (Alfred could still re-arm mid-wait).
+            if not teleport_transition.helltide_hold_logged then
+                log('via-Temis preamble: holding warplan teleport — incoming is helltide, helltide is in off-window (minute 55-59)')
+                teleport_transition.helltide_hold_logged = true
+            end
         elseif settled >= POST_ALFRED_SETTLE_SECONDS then
+            if teleport_transition.helltide_hold_logged then
+                log('via-Temis preamble: helltide window active again — proceeding to warplan teleport')
+                teleport_transition.helltide_hold_logged = false
+            end
             log(string.format(
                 'via-Temis preamble: post-Alfred settle clear (%.1fs) — proceeding to warplan teleport',
                 settled))
@@ -1413,6 +1470,39 @@ function orchestrator.tick()
                     teleport_transition.snap_zone  = nil
                     log('teleport: warplan not available on retry — releasing gate')
                 end
+            end
+        end
+    end
+
+    -- ── HELLTIDE CHASE ──────────────────────────────────────────────────────
+    -- Helltide events spawn monsters in waves at multiple locations across the
+    -- zone. Once a wave clears, HelltideRevamped doesn't always re-target the
+    -- next event spot fast enough — the player stands idle until mobs respawn
+    -- locally. While we have the helltide buff and HR owns the run, re-fire
+    -- warplan.teleport_to_activity() every HELLTIDE_CHASE_INTERVAL between
+    -- waves (no nearby enemies) to chase the next active event.
+    --
+    -- Bypasses the orchestrator's teleport state machine on purpose: this is
+    -- in-zone re-targeting, not a handoff, so we don't want via-Temis preamble
+    -- or settle gates here. Still gated on state==IDLE so we never collide
+    -- with a managed handoff teleport in flight.
+    if owned['HelltideRevampedPlugin']
+        and teleport_transition.state == 'IDLE'
+        and not teleport_pending
+        and next(pending_disable) == nil
+        and has_helltide_buff()
+        and not enemies_near_player()
+        and (now - last_helltide_chase_at) >= HELLTIDE_CHASE_INTERVAL
+    then
+        if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
+            local ok = pcall(warplan.teleport_to_activity)
+            last_helltide_chase_at = now
+            if ok then
+                log(string.format(
+                    'helltide chase: warplan.teleport_to_activity() (between-waves re-target, every %.1fs)',
+                    HELLTIDE_CHASE_INTERVAL))
+            else
+                log('helltide chase: warplan.teleport_to_activity() threw — will retry')
             end
         end
     end
@@ -1521,6 +1611,8 @@ function orchestrator.release_all()
     teleport_transition.alfred_was_busy   = false
     teleport_transition.alfred_picked_up  = false
     teleport_transition.settle_started_at = nil
+    teleport_transition.helltide_hold_logged = false
+    last_helltide_chase_at   = -math.huge
     had_active_session       = false
     -- Filler-pit state — re-arm only after the next session sees a turn-in.
     turn_in_was_matched      = false

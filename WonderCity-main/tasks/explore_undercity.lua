@@ -42,18 +42,20 @@ local function scan_log_objectives()
     local actors = actors_manager:get_ally_actors()
     for _, actor in pairs(actors) do
         local name = actor:get_skin_name()
-        for _, def in ipairs(SCAN_ACTORS) do
-            if name:match(def.pattern) then
-                local pos = actor:get_position()
-                local key = name .. string.format('%.0f%.0f', pos:x(), pos:y())
-                if not scan_seen[key] then
-                    scan_seen[key] = true
-                    local dist = utils.distance(player, actor)
-                    console.print(string.format(
-                        '[WonderCity:scan] FIRST_SEEN %-14s | dist=%5.1f | name=%s | pos=(%.1f, %.1f)',
-                        def.label, dist, name, pos:x(), pos:y()))
+        if name then
+            for _, def in ipairs(SCAN_ACTORS) do
+                if name:match(def.pattern) then
+                    local pos = actor:get_position()
+                    local key = name .. string.format('%.0f%.0f', pos:x(), pos:y())
+                    if not scan_seen[key] then
+                        scan_seen[key] = true
+                        local dist = utils.distance(player, actor)
+                        console.print(string.format(
+                            '[WonderCity:scan] FIRST_SEEN %-14s | dist=%5.1f | name=%s | pos=(%.1f, %.1f)',
+                            def.label, dist, name, pos:x(), pos:y()))
+                    end
+                    break
                 end
-                break
             end
         end
     end

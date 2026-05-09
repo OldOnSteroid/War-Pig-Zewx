@@ -208,7 +208,13 @@ local run_steps = function ()
     -- world actor like an NPC), and the inventory item is never used.
     if task.step == STEP.TRIBUTE then
         if settings.skip_tribute then
-            task.step = settings.enable_bargains and STEP.BARGAIN_OPEN or STEP.OPEN_PORTAL
+            -- Route through TRIBUTE_WAIT so the next click (OPEN_PORTAL or
+            -- BARGAIN_OPEN) inherits CLICK_DELAY. Without this the flow was
+            -- brazier_interact → vendor_open → step=0 → TRIBUTE → skip →
+            -- OPEN_PORTAL → click within ~150ms, faster than the vendor UI
+            -- can settle. Setting step_time = now arms the wait().
+            task.step = STEP.TRIBUTE_WAIT
+            task.step_time = now
             task.status = status_enum['WAITING'] .. 'tribute (skipped)'
             return
         end
@@ -405,6 +411,30 @@ local open_portal = function (delay)
 
     if loot_manager:is_in_vendor_screen() then
         run_steps()
+    elseif task.step >= STEP.ACCEPT_WAIT then
+        -- Accept fired → vendor closed → portal is spawning. Do NOT re-interact
+        -- the brazier here: that re-opens the vendor and reset_state() snaps
+        -- task.step back to 0, restarting tribute/bargain/accept while the
+        -- player is already running to the just-spawned portal. Just wait —
+        -- Execute()'s portal!=nil branch picks up the moment get_entrance_portal()
+        -- resolves. Gate is intentionally ACCEPT_WAIT, not OPEN_PORTAL — the
+        -- OPEN_PORTAL→ACCEPT window relies on the original respam path to
+        -- recover if the vendor briefly closes for the confirmation dialog.
+        task.status = status_enum['WAITING'] .. 'for portal to spawn'
+        -- Recovery: if no portal appeared in a generous window, retry from
+        -- scratch (re-interact brazier on the next tick).
+        local PORTAL_SPAWN_TIMEOUT = 30.0
+        if task.step_time > 0 and
+            now - task.step_time > PORTAL_SPAWN_TIMEOUT
+        then
+            console.print(string.format(
+                '[WonderCity:enter] portal never spawned in %.0fs after accept — restarting flow',
+                PORTAL_SPAWN_TIMEOUT))
+            task.step          = 0
+            task.step_time     = -1
+            task.bargain_idx   = 0
+            task.interacted    = false
+        end
     elseif delay and task.debounce_time + settings.confirm_delay > get_time_since_inject() then
         task.status = status_enum['WAITING'] .. 'for confirmation'
         return
@@ -416,6 +446,17 @@ end
 
 local enter_portal = function (portal)
     interact_object(portal)
+    -- Clear the step machine so the next town visit re-runs tribute/bargain/
+    -- accept from scratch. Without this, task.step stays at STEP.ACCEPT_WAIT
+    -- (or later) from this run; combined with the post-accept brazier-skip
+    -- gate in open_portal, that would silently skip the entire flow on the
+    -- next entry.
+    task.step                = 0
+    task.step_time           = -1
+    task.bargain_idx         = 0
+    task.interacted          = false
+    task.interact_started_at = -1
+    task.interact_threshold  = INTERACT_THRESHOLD_DEFAULT
     BatmobilePlugin.reset(plugin_label)
     tracker.undercity_start_time = get_time_since_inject()
     tracker.exit_trigger_time = nil
@@ -459,6 +500,20 @@ task.Execute = function ()
             BatmobilePlugin.move(plugin_label)
             task.status = status_enum['WALKING'] .. 'portal'
         else
+            -- Post-accept settle: don't fire interact_object on the portal
+            -- the same frame it appears in the actor list. The game is still
+            -- finishing the open-undercity action; an interact too early
+            -- gets rejected ("You cannot do that in this area"). step_time
+            -- here corresponds to the ACCEPT click (set by run_steps in the
+            -- ACCEPT branch and not touched after).
+            local POST_ACCEPT_SETTLE = 1.5
+            if task.step == STEP.ACCEPT_WAIT and
+                task.step_time > 0 and
+                get_time_since_inject() < task.step_time + POST_ACCEPT_SETTLE
+            then
+                task.status = status_enum['WAITING'] .. 'post-accept settle'
+                return
+            end
             enter_portal(portal)
         end
     elseif spirit_brazier == nil or utils.distance(player_pos, spirit_brazier) > task.interact_threshold then

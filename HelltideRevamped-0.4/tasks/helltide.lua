@@ -54,12 +54,38 @@ local _chest_stuck_dist = math.huge
 local _chest_micropartial_count   = 0
 local _chest_micropartial_last_id = 0
 
+-- Long-path recall watchdogs (mirror Arkham kill_boss "remembered hunt"): single-
+-- shot navigate_long_path used to permanently fall back to non-paused set_target
+-- for the whole trip. With Batmobile not paused, navigator hijacks the custom
+-- target with explorer frontier picks whenever A* fails, so the bot ping-pongs
+-- between the chest and frontiers ~46u away until the trap detector gives up
+-- the zone (logzewx: 60s trapped + helltide abandoned). Fix: pause Batmobile,
+-- retry long-path every 2s, and blacklist the chest if either watchdog trips.
+local RECALL_LONG_PATH_RETRY     = 2.0   -- seconds between navigate_long_path attempts
+local RECALL_FAIL_THRESHOLD      = 3     -- consecutive long_path returns=false → blacklist
+local RECALL_NO_PROGRESS_SECS    = 25    -- best-dist not improved by DELTA in this long → blacklist
+local RECALL_PROGRESS_DELTA      = 2.0   -- meters of improvement to count as progress
+local _recall_long_path_target   = nil
+local _recall_path_issue_time    = -math.huge
+local _recall_fail_count         = 0
+local _recall_best_dist          = nil
+local _recall_progress_time      = nil
+
+local function recall_state_reset()
+    _recall_long_path_target = nil
+    _recall_path_issue_time  = -math.huge
+    _recall_fail_count       = 0
+    _recall_best_dist        = nil
+    _recall_progress_time    = nil
+end
+
 local function chest_stuck_reset()
     _chest_stuck_key  = nil
     _chest_stuck_t    = 0
     _chest_stuck_dist = math.huge
     _chest_micropartial_count   = 0
     _chest_micropartial_last_id = 0
+    recall_state_reset()
 end
 
 -- Farm-chest state: when a nearby chest needs <50 more cinders we stay in its 30-unit
@@ -2518,6 +2544,8 @@ local helltide_task = {
                 BatmobilePlugin.stop_long_path(plugin_label)
             end
             clear_movement()
+            recall_state_reset()
+            if BatmobilePlugin then BatmobilePlugin.resume(plugin_label) end
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
         end
@@ -2532,6 +2560,8 @@ local helltide_task = {
                 BatmobilePlugin.stop_long_path(plugin_label)
             end
             clear_movement()
+            recall_state_reset()
+            if BatmobilePlugin then BatmobilePlugin.resume(plugin_label) end
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
         end
@@ -2633,6 +2663,8 @@ local helltide_task = {
                 BatmobilePlugin.stop_long_path(plugin_label)
             end
             clear_movement()
+            recall_state_reset()
+            if has_batmobile then BatmobilePlugin.resume(plugin_label) end
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
         end
@@ -2676,6 +2708,7 @@ local helltide_task = {
                     remembered_chest_target = nil
                     last_chest_interact_time = -math.huge
                     tracker.clear_key("remembered_chest_timeout")
+                    recall_state_reset()
                     self.current_state = helltide_state.EXPLORE_HELLTIDE
                     return
                 end
@@ -2714,42 +2747,95 @@ local helltide_task = {
             remembered_chest_target = nil
             tracker.clear_key("remembered_chest_timeout")
             clear_movement()
+            recall_state_reset()
+            if has_batmobile then BatmobilePlugin.resume(plugin_label) end
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
         end
 
-        -- Far away: use long path (uncapped pathfinding, handles traversals)
+        -- Far away: use long path with retry + watchdogs (mirrors Arkham kill_boss
+        -- remembered_hunt). Pausing Batmobile is essential — without pause, the
+        -- navigator overrides our custom target with explorer-picked frontiers
+        -- whenever A* fails on the goal, and HR re-asserts the target each tick,
+        -- producing a ping-pong that never makes progress.
         if has_batmobile and BatmobilePlugin.navigate_long_path and BatmobilePlugin.is_long_path_navigating then
-            if not long_path_active then
-                if not remembered_chest_long_path_started then
-                    -- First attempt: try navigate_long_path exactly once for this chest target.
-                    -- Set the flag BEFORE calling so a failure never causes a retry next frame.
-                    remembered_chest_long_path_started = true
-                    local ok = BatmobilePlugin.navigate_long_path(plugin_label, entry.position)
-                    if ok then
-                        remembered_chest_long_path_ok = true
-                        console.print(string.format("[CHEST RECALL] Long path started to %s (%.1f,%.1f)",
-                            entry.name, entry.position:x(), entry.position:y()))
-                    else
-                        remembered_chest_long_path_ok = false
-                        console.print("[CHEST RECALL] Long path failed to find route, falling back to navigate_to")
-                        navigate_to(entry.position)
+            BatmobilePlugin.pause(plugin_label)
+
+            -- No-progress watchdog: track best-ever distance to chest. If it
+            -- doesn't shrink by RECALL_PROGRESS_DELTA in RECALL_NO_PROGRESS_SECS,
+            -- the chest is unreachable from the current side — blacklist and
+            -- yield to patrol.
+            if _recall_best_dist == nil
+                or dist < _recall_best_dist - RECALL_PROGRESS_DELTA
+            then
+                _recall_best_dist     = dist
+                _recall_progress_time = now_t
+            end
+            if _recall_progress_time
+                and (now_t - _recall_progress_time) > RECALL_NO_PROGRESS_SECS
+            then
+                console.print(string.format(
+                    "[CHEST RECALL] no progress toward %s for %ds (best=%.1f cur=%.1f) — blacklisting %.0fs and resuming patrol",
+                    entry.name, RECALL_NO_PROGRESS_SECS, _recall_best_dist, dist, CHEST_BLACKLIST_DURATION))
+                chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                if BatmobilePlugin.stop_long_path then
+                    BatmobilePlugin.stop_long_path(plugin_label)
+                end
+                clear_movement()
+                BatmobilePlugin.resume(plugin_label)
+                remembered_chest_target = nil
+                chest_stuck_reset()
+                self.current_state = helltide_state.EXPLORE_HELLTIDE
+                return
+            end
+
+            -- (Re)issue navigate_long_path: first attempt, target drift, or
+            -- long-path session ended (completed/failed) and retry interval
+            -- elapsed. Failure-count guard blacklists after RECALL_FAIL_THRESHOLD
+            -- consecutive returns=false (target genuinely unreachable from here).
+            local need_repath = false
+            if _recall_long_path_target == nil then
+                need_repath = (now_t - _recall_path_issue_time) > RECALL_LONG_PATH_RETRY
+            elseif _recall_long_path_target:dist_to(entry.position) > 3 then
+                need_repath = true
+            elseif not long_path_active
+                and (now_t - _recall_path_issue_time) > RECALL_LONG_PATH_RETRY
+            then
+                need_repath = true
+            end
+            if need_repath then
+                local ok = BatmobilePlugin.navigate_long_path(plugin_label, entry.position)
+                _recall_path_issue_time = now_t
+                if ok then
+                    _recall_long_path_target = vec3:new(entry.position:x(), entry.position:y(), entry.position:z())
+                    _recall_fail_count = 0
+                    console.print(string.format("[CHEST RECALL] Long path started to %s (%.1f,%.1f)",
+                        entry.name, entry.position:x(), entry.position:y()))
+                else
+                    _recall_long_path_target = nil
+                    _recall_fail_count = _recall_fail_count + 1
+                    console.print(string.format(
+                        "[CHEST RECALL] long_path to %s failed (#%d/%d)",
+                        entry.name, _recall_fail_count, RECALL_FAIL_THRESHOLD))
+                    if _recall_fail_count >= RECALL_FAIL_THRESHOLD then
+                        console.print(string.format(
+                            "[CHEST RECALL] %d consecutive long_path failures — blacklisting %s for %.0fs and resuming patrol",
+                            RECALL_FAIL_THRESHOLD, entry.name, CHEST_BLACKLIST_DURATION))
+                        chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                        if BatmobilePlugin.stop_long_path then
+                            BatmobilePlugin.stop_long_path(plugin_label)
+                        end
+                        clear_movement()
+                        BatmobilePlugin.resume(plugin_label)
+                        remembered_chest_target = nil
+                        chest_stuck_reset()
+                        self.current_state = helltide_state.EXPLORE_HELLTIDE
                         return
                     end
-                elseif not remembered_chest_long_path_ok then
-                    -- Long path previously failed; skip it and use navigate_to directly
-                    navigate_to(entry.position)
-                    return
-                else
-                    -- Long path succeeded and completed; use set_target for the remaining distance
-                    BatmobilePlugin.resume(plugin_label)
-                    BatmobilePlugin.set_target(plugin_label, entry.position, false)
-                    bm_pulse(true)
-                    return
                 end
             end
-            -- Long path is active — drive it
-            bm_pulse()
+            -- Drive whichever long-path session is active (or just-issued).
+            bm_pulse(true)
         else
             navigate_to(entry.position)
         end
@@ -3086,6 +3172,7 @@ local helltide_task = {
         remembered_chest_target = nil
         remembered_chest_long_path_started = false
         remembered_chest_long_path_ok = false
+        recall_state_reset()
         returning_to_helltide = false
         last_in_zone_pos      = nil
         experimental_armed    = false

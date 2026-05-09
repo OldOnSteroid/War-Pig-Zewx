@@ -66,8 +66,9 @@ gui.elements = {
     dungeon_reset_enabled  = cb(false,      "dr_en"),
     dungeon_reset_interval = si(1, 200, 10, "dr_int"),
 
-    use_alfred    = cb(true,  "alfred"),
-    use_batmobile = cb(false, "batmobile"),
+    use_alfred       = cb(true,  "alfred"),
+    use_batmobile    = cb(false, "batmobile"),
+    manage_orbwalker = cb(false, "manage_orb"),
 
     -- Default 0 = Temis (matches ArkhamAsylum's default).
     town          = cbo(0,    "town"),
@@ -214,6 +215,8 @@ function gui.render()
             "Hand off inventory/repair/restock tasks to Alfred.")
         gui.elements.use_batmobile:render("Use Batmobile Navigation",
             "Always use BatmobilePlugin for navigation. When off, path files are tried first and Batmobile is engaged automatically as a fallback.")
+        gui.elements.manage_orbwalker:render("Manage Orbwalker",
+            "When OFF (default), Reaper never touches orbwalker — your rotation owns it. When ON, Reaper forces clear-mode + block-movement during boss combat.")
 
         gui.elements.misc_tree:pop()
     end

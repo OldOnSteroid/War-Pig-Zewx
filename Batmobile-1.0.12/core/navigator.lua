@@ -365,8 +365,15 @@ local get_movement_spell_id = function(local_player)
         if settings.use_aoj and utility.can_cast_spell(2297125) then
             return 2297125, true
         end
+    elseif class == 'warlock' then
+        if settings.use_wraith_step and utility.can_cast_spell(2218211) then
+            return 2218211, false
+        end
+        if settings.use_demonic_slash and utility.can_cast_spell(2221282) then
+            return 2221282, settings.demonic_slash_los == true
+        end
     end
-    -- class == 'default' or class == 'druid' or class == 'necromancer'
+    -- class == 'druid' or class == 'necromancer'
     -- everyone has evade (hopefully)
     if settings.use_evade and utility.can_cast_spell(337031) then
         return 337031, false
@@ -562,6 +569,7 @@ local unstuck = function (local_player)
             cast_spell.position(337031, unstuck_node, 0)
             return
         elseif movement_spell_id ~= nil and raycast_success and
+            utils.distance(navigator.last_pos, unstuck_node) >= (settings.min_spell_dist or 0) and
             (navigator.unstuck_nodes[unstuck_node_str] == nil or
             navigator.unstuck_nodes[unstuck_node_str] == 'evaded')
         then
@@ -1166,8 +1174,8 @@ navigator.move = function ()
                     new_path[#new_path+1] = node
                     selected = true
                 elseif navigator.blacklisted_spell_node[node_str] == nil and
-                    -- move to nodes that is >= movement step 
-                    utils.distance(node, cur_node) >= navigator.movement_step
+                    -- move to nodes that is >= max(movement step, user min)
+                    utils.distance(node, cur_node) >= math.max(navigator.movement_step, settings.min_spell_dist or 0)
                 then
                     spell_node = node
                     node_dist = dist

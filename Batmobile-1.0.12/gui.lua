@@ -16,7 +16,8 @@ local get_character_class = function (local_player)
         [6] = 'necromancer',
         [7] = 'spiritborn',
         [8] = 'default', -- new class in expansion, dont know name yet
-        [9] = 'paladin'
+        [9] = 'paladin',
+        [10] = 'warlock'
     }
     if character_classes[class_id] then
         return character_classes[class_id]
@@ -57,6 +58,10 @@ gui.elements = {
     use_advance = create_checkbox(true, "use_advance"),
     use_falling_star = create_checkbox(true, "use_falling_star"),
     use_aoj = create_checkbox(true, "use_aoj"),
+    use_wraith_step = create_checkbox(true, "use_wraith_step"),
+    use_demonic_slash = create_checkbox(true, "use_demonic_slash"),
+    demonic_slash_los = create_checkbox(true, "demonic_slash_los"),
+    min_spell_dist = slider_float:new(1.0, 20.0, 3.0, get_hash(plugin_label .. '_min_spell_dist')),
     require_full_path_explore = create_checkbox(false, "require_full_path_explore"),
     explore_path_budget_ms = slider_int:new(50, 500, 150, get_hash(plugin_label .. '_explore_path_budget_ms')),
     path_smooth_step = slider_float:new(0.0, 10.0, 1.0, get_hash(plugin_label .. '_path_smooth_step')),
@@ -99,9 +104,19 @@ function gui.render()
             gui.elements.use_advance:render('advance', 'use advance for movement')
             gui.elements.use_falling_star:render('falling star', 'use falling star for movement')
             gui.elements.use_aoj:render('Arbiter of Justice', 'use Arbiter of Justice for movement')
-        elseif class == 'default' and class == 'druid' and class == 'necromancer' then
-
+        elseif class == 'warlock' then
+            gui.elements.use_wraith_step:render('wraith step', 'use wraith step for movement (position-cast mobility, the proper warlock movement skill)')
+            gui.elements.use_demonic_slash:render('demonic slash', 'use demonic slash for movement (NOTE: target-cast cooldown — may not fire via Batmobile position-cast)')
+            gui.elements.demonic_slash_los:render('  demonic slash requires LOS',
+                'On = require line-of-sight raycast to the destination (charge-style: blocked by walls).\n' ..
+                'Off = skip the LOS check (blink-style: phases through obstacles).\n' ..
+                'Try OFF first if the cast never fires.')
         end
+        gui.elements.min_spell_dist:render('Min spell distance',
+            'Minimum distance (in units) from the player to a path node before a movement\n' ..
+            'spell will target that node. Raise to stop the bot from burning movement\n' ..
+            'cooldowns on tiny hops; lower to let it cast more aggressively on short paths.\n' ..
+            'Default 3.0.', 1)
         gui.elements.movement_tree:pop()
     end
     gui.elements.require_full_path_explore:render('Full path only (explore)',

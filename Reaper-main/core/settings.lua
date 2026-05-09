@@ -6,9 +6,10 @@ local gui      = require "gui"
 local enums    = require "data.enums"
 
 local settings = {
-    enabled       = false,
-    use_alfred    = true,
-    use_batmobile = false,
+    enabled          = false,
+    use_alfred       = true,
+    use_batmobile    = false,
+    manage_orbwalker = false,
 
     -- Resolved from gui.town selection in update_settings(). Defaults to
     -- gui.town_data[0] (Temis) so first-frame reads are valid before the GUI
@@ -58,9 +59,10 @@ for _, bd in ipairs(enums.boss_zones) do
 end
 
 function settings:update_settings()
-    settings.enabled       = gui.elements.main_toggle:get()
-    settings.use_alfred    = gui.elements.use_alfred:get()
-    settings.use_batmobile = gui.elements.use_batmobile:get()
+    settings.enabled          = gui.elements.main_toggle:get()
+    settings.use_alfred       = gui.elements.use_alfred:get()
+    settings.use_batmobile    = gui.elements.use_batmobile:get()
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
 
     local town_idx        = gui.elements.town:get()
     local town_data       = gui.town_data[town_idx] or gui.town_data[0]
@@ -128,6 +130,18 @@ function settings:update_settings()
         x = gui.elements.belial_open_x:get(),
         y = gui.elements.belial_open_y:get(),
     }
+end
+
+settings.orb_set_clear = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_clear_toggle(v)
+    end
+end
+
+settings.orb_set_block = function (v)
+    if settings.manage_orbwalker then
+        orbwalker.set_block_movement(v)
+    end
 end
 
 return settings
