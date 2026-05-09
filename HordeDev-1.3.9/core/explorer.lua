@@ -614,6 +614,14 @@ function explorer:movement_spell_to_target(target)
         table.insert(movement_spell_id, 196545) -- Barbarian Leap
     end
 
+    if settings.use_nether_step then
+        table.insert(movement_spell_id, 2218211) -- Warlock Nether Step (Wraith Step)
+    end
+
+    if settings.use_rampage then
+        table.insert(movement_spell_id, 2221282) -- Warlock Rampage (Demonic Slash)
+    end
+
     -- Check if the dash spell is off cooldown and ready to cast
     for _, spell_id in ipairs(movement_spell_id) do
         if local_player:is_spell_ready(spell_id) then

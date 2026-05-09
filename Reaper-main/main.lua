@@ -1,5 +1,5 @@
 -- ============================================================
---  Reaper  v1.8
+--  Reaper  v1.9
 --  by Magoogle
 --
 --  Flow per run:
@@ -30,6 +30,11 @@ local belial_chest = require "tasks.belial_chest"
 -- -------------------------------------------------------
 local enabled_last_frame = false
 local enable_time        = 0   -- time when toggle was first turned on
+
+-- Callback registered by ReaperPlugin.run_once(). Fired after Reaper
+-- returns to town and disables cleanly. Cleared on manual stop so the
+-- orchestrator never receives a stale signal.
+local run_once_callback = nil
 
 local function on_enable()
     local lp = get_local_player()
@@ -99,6 +104,7 @@ local function on_disable()
     -- Drop any one-shot rotation injected by an external orchestrator so the
     -- next manual enable goes back to inventory-derived farming.
     rotation.clear_external()
+    run_once_callback = nil  -- discard if user manually stopped mid-run
     console.print("[Reaper] Stopped.")
     console.print(string.format("[Reaper] Total runs completed this session: %d", tracker.total_kills))
 end
@@ -172,6 +178,13 @@ on_update(function()
             gui.elements.main_toggle:set(false)
             enabled_last_frame = false
             startup_done       = false
+            -- Notify orchestrator now that Reaper is fully stopped and in town.
+            -- pcall so a crashing callback cannot break the main loop.
+            if run_once_callback then
+                local cb = run_once_callback
+                run_once_callback = nil
+                pcall(cb)
+            end
         end
         return
     end
@@ -198,7 +211,7 @@ on_render(function()
     end
 
     local x, y = 20, 60
-    graphics.text_2d("=== REAPER  v1.8  by Magoogle ===", vec2:new(x, y), 14, color_orange(255))
+    graphics.text_2d("=== REAPER  v1.9  by Magoogle ===", vec2:new(x, y), 14, color_orange(255))
     y = y + 20
 
     if boss then
@@ -281,6 +294,34 @@ ReaperPlugin = {
         return true
     end,
 
+    -- Single-run orchestrator override.
+    -- Runs boss_id exactly once (kill + chest + return to town) then halts.
+    -- on_complete() is called after Reaper reaches town and before it stops,
+    -- signalling that control can be handed back to the orchestrator.
+    --
+    -- boss_id   : string matching enums.boss_zones id (e.g. "duriel")
+    -- run_type  : "lair" | "greater" | "husk" — nil infers from enum
+    -- on_complete : optional function() called on clean finish
+    --
+    -- Returns true if the request was accepted, false if boss_id is unknown.
+    --
+    -- Example (orchestrator side):
+    --   ReaperPlugin.run_once("duriel", nil, function()
+    --       console.print("Reaper done — taking back control")
+    --   end)
+    run_once = function(boss_id, run_type, on_complete)
+        if not rotation.set_external(boss_id, run_type) then
+            console.print(string.format("[Reaper] run_once: unknown boss '%s'", tostring(boss_id)))
+            return false
+        end
+        run_once_callback = type(on_complete) == "function" and on_complete or nil
+        task_manager.reset_all()
+        gui.elements.main_toggle:set(true)
+        console.print(string.format("[Reaper] run_once: queued %s [%s]",
+            tostring(boss_id), tostring(run_type or "auto")))
+        return true
+    end,
+
     -- Drop the external rotation without disabling. Useful if an orchestrator
     -- wants to hand control back to inventory-driven farming.
     clear_external = function() rotation.clear_external() end,
@@ -288,6 +329,7 @@ ReaperPlugin = {
     status  = function()
         return {
             enabled    = gui.elements.main_toggle:get(),
+            busy       = gui.elements.main_toggle:get(),
             boss       = rotation.current() and rotation.current().label or "None",
             external   = rotation.external,
             total_runs = tracker.total_kills,
@@ -297,6 +339,6 @@ ReaperPlugin = {
 }
 
 console.print("=============================================")
-console.print("  Reaper  v1.8  by Magoogle  - Loaded")
+console.print("  Reaper  v1.9  by Magoogle  - Loaded")
 console.print("  Enable in menu to start reaping")
 console.print("=============================================")

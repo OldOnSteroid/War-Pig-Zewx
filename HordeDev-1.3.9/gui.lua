@@ -61,6 +61,8 @@ gui.elements = {
     use_soar = create_checkbox(true, "use_soar"),
     use_rushing_claw = create_checkbox(true, "use_rushing_claw"),
     use_leap = create_checkbox(true, "use_leap"),
+    use_nether_step = create_checkbox(true, "use_nether_step"),
+    use_rampage = create_checkbox(true, "use_rampage"),
     use_alfred = create_checkbox(true, "use_alfred"),
     use_6_wave = create_checkbox(true, "use_6_wave"),
     use_8_wave = create_checkbox(true, "use_8_wave"),
@@ -99,6 +101,8 @@ function gui.render()
                 gui.elements.use_soar:render("Spiritborn Soar", "Will attempt to use Spiritborn Soar as movement spell")
                 gui.elements.use_rushing_claw:render("Spiritborn Rushing Claw", "Will attempt to use Spiritborn Rushing Claw as movement spell")
                 gui.elements.use_leap:render("Barbarian Leap", "Will attempt to use Barbarian Leap as movement spell")
+                gui.elements.use_nether_step:render("Warlock Nether Step", "Will attempt to use Warlock Nether Step (Wraith Step) as movement spell")
+                gui.elements.use_rampage:render("Warlock Rampage", "Will attempt to use Warlock Rampage (Demonic Slash) as movement spell")
                 gui.elements.movement_tree:pop()
             end
         end

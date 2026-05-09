@@ -75,6 +75,9 @@ gui.elements = {
     minimum_glyph_level = slider_int:new(1, 100, 1, get_hash(plugin_label .. '_' .. 'minimum_glyph_level')),
     maximum_glyph_level = slider_int:new(1, 150, 100, get_hash(plugin_label .. '_' .. 'maximum_glyph_level')),
     interact_shrine = create_checkbox(true, 'interact_shrine'),
+    chase_goblin = create_checkbox(true, 'chase_goblin'),
+    pickup_heart_of_stone = create_checkbox(true, 'pickup_heart_of_stone'),
+    use_burden_altar = create_checkbox(true, 'use_burden_altar'),
     party_settings_tree = tree_node:new(1),
     party_enabled = create_checkbox(false, 'party_enabled'),
     party_mode = combo_box:new(0, get_hash(plugin_label .. '_' .. 'party_mode')),
@@ -129,6 +132,9 @@ gui.render = function ()
         gui.elements.exit_mode:render('Exit mode', gui.exit_mode, 'Select reset or teleport to exit pit')
         gui.elements.return_for_loot:render('Return for loot', 'return for loot after alfred run')
         gui.elements.interact_shrine:render('Enable shrine interaction (and belial eye)', 'Enable shrine interaction (and belial eye)')
+        gui.elements.chase_goblin:render('Chase goblin', 'Prioritize chasing treasure goblins over normal enemies. On by default.')
+        gui.elements.pickup_heart_of_stone:render('Pickup Heart of Stone', 'Detour to and pick up Choron\'s Burden (Heart of Stone) carryables anywhere in the pit. On by default.')
+        gui.elements.use_burden_altar:render('Use Burden Altar', 'After the boss dies, walk to the Choron\'s Burden Receptacle and interact for an extra glyph upgrade chance. Runs before glyph upgrade and Choron\'s Soul. On by default.')
         gui.elements.speed_mode:render('Speed Mode (beta test)', 'Never stop for monsters — path through dense packs and let AltClick + evade explosions handle kills')
         gui.elements.push_mode:render('Push Mode (beta test)', 'Aggro small groups and pull them together before engaging — maximizes AoE value')
         if gui.elements.push_mode:get() then

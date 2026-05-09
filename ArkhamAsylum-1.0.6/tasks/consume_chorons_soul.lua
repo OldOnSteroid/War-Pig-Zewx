@@ -119,7 +119,9 @@ local function get_chorons_soul()
 end
 
 task.shouldExecute = function()
-    if settings.speed_mode then return false end
+    -- No speed_mode gate: the soul is a one-shot post-boss interaction. Speed
+    -- mode is about not stopping for trash on the way down, not about skipping
+    -- the XP-from-soul mechanic the user opted into.
     if not settings.use_chorons_soul then return false end
     if not utils.player_in_pit() then return false end
 

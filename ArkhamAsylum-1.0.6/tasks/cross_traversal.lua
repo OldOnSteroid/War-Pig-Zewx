@@ -46,6 +46,47 @@ local _trav_cache_dist = nil
 local _trav_cache_time = -1
 local TRAV_CACHE_TTL = 0.1
 
+-- Per-gizmo cumulative engagement budget. Without this, an unreachable trav
+-- chews 12s engagements forever: ENGAGEMENT_TIMEOUT yields, portal task
+-- fails to path, sets long_path_failed_time, cross_traversal re-engages the
+-- same gizmo within FAILURE_WINDOW. Result is hours stuck spamming
+-- force_move + interact at one cliff.
+-- Track total seconds spent engaged on each gizmo (keyed by skin name +
+-- rounded position so re-engagements accumulate). After GIZMO_TOTAL_TIMEOUT
+-- of failed engagement, mark blacklisted for the rest of this world; a new
+-- world (next floor, or pit re-entry) clears the table.
+local _gizmo_attempts = {}
+local _blacklist_world = nil
+local _engagement_gizmo_key = nil
+local GIZMO_TOTAL_TIMEOUT = 60
+
+local function gizmo_key(actor)
+    if not actor then return nil end
+    local pos = actor:get_position()
+    if not pos then return nil end
+    local name = actor:get_skin_name() or 'trav'
+    return string.format('%s@%.0f_%.0f', name, pos:x(), pos:y())
+end
+
+local function update_blacklist_world()
+    local world = get_current_world()
+    if not world then return end
+    local wname = world:get_name()
+    if wname ~= _blacklist_world then
+        if next(_gizmo_attempts) ~= nil then
+            console.print('[cross_traversal] world changed — clearing gizmo blacklist')
+        end
+        _gizmo_attempts = {}
+        _blacklist_world = wname
+    end
+end
+
+local function gizmo_blacklisted(actor)
+    local k = gizmo_key(actor)
+    if not k then return false end
+    return (_gizmo_attempts[k] or 0) >= GIZMO_TOTAL_TIMEOUT
+end
+
 -- Pick the best interactable Traversal_Gizmo within TRAV_SEARCH_RADIUS.
 -- Direction-aware:
 --   * If a portal is visible, prefer traversals going toward the portal's Z
@@ -57,7 +98,9 @@ local TRAV_CACHE_TTL = 0.1
 --     a Down and Up sitting at the same cliff edge).
 local function find_best_trav(local_player)
     local now = get_time_since_inject()
-    if now - _trav_cache_time < TRAV_CACHE_TTL then
+    if now - _trav_cache_time < TRAV_CACHE_TTL
+        and (_trav_cache == nil or not gizmo_blacklisted(_trav_cache))
+    then
         return _trav_cache, _trav_cache_dist
     end
     local best_trav = nil
@@ -93,7 +136,9 @@ local function find_best_trav(local_player)
                     elseif name:find('Down') then trav_dir = -1 end
                     -- Skip wrong-direction climbs entirely (Jump_*/Slide_* etc.
                     -- with trav_dir=0 are direction-neutral and stay eligible).
-                    if trav_dir == 0 or trav_dir == want_dir then
+                    if (trav_dir == 0 or trav_dir == want_dir)
+                        and not gizmo_blacklisted(actor)
+                    then
                         local score = (trav_dir == want_dir and 100 or 0) - d
                         if score > best_score then
                             best_score = score
@@ -111,18 +156,44 @@ local function find_best_trav(local_player)
     return best_trav, best_dist
 end
 
-local function reset_engagement()
+-- failed=true charges the engagement duration against the gizmo's cumulative
+-- budget. cross-detected and climb-in-progress paths pass false so a working
+-- gizmo never gets its budget spent.
+local function reset_engagement(failed)
+    if failed and _engagement_gizmo_key ~= nil and _engagement_start > 0 then
+        local elapsed = get_time_since_inject() - _engagement_start
+        local total = (_gizmo_attempts[_engagement_gizmo_key] or 0) + elapsed
+        _gizmo_attempts[_engagement_gizmo_key] = total
+        if total >= GIZMO_TOTAL_TIMEOUT then
+            console.print(string.format(
+                '[cross_traversal] %s exhausted %.0fs cumulative — blacklisting for this world',
+                _engagement_gizmo_key, total))
+        end
+    end
     _engagement_start = -math.huge
     _engagement_pos = nil
     _interact_count = 0
     _pos_at_last_interact = nil
+    _engagement_gizmo_key = nil
 end
 
 task.shouldExecute = function ()
     if not utils.player_in_pit() then
-        reset_engagement()
+        reset_engagement(false)
         return false
     end
+    -- Reset-timer override: when exit_pit's hard deadline has fired, drop any
+    -- in-flight engagement and yield. force_move_raw at the gizmo cancels the
+    -- teleport_to_waypoint channel each frame, so without this yield the bot
+    -- never actually leaves the pit.
+    if utils.exit_pit_forced() then
+        if _engagement_start > 0 then
+            console.print('[cross_traversal] exit_pit forced — yielding gizmo engagement')
+            reset_engagement(false)
+        end
+        return false
+    end
+    update_blacklist_world()
     -- Active routing through navigator (via try_traversal_route success)
     if BatmobilePlugin.is_traversal_routing() then return true end
 
@@ -144,7 +215,7 @@ task.shouldExecute = function ()
         if now - _engagement_start > ENGAGEMENT_TIMEOUT then
             console.print('[cross_traversal] engagement timeout (' ..
                 ENGAGEMENT_TIMEOUT .. 's) — yielding')
-            reset_engagement()
+            reset_engagement(true)
             return false
         end
         if _engagement_pos ~= nil then
@@ -158,7 +229,7 @@ task.shouldExecute = function ()
                 -- inverse climb gizmo right next to the landing point.
                 _last_cross_time = now
                 portal_task.long_path_failed_time = -math.huge
-                reset_engagement()
+                reset_engagement(false)
                 return false
             end
         end
@@ -193,13 +264,14 @@ task.Execute = function ()
             -- it as a successful cross and trigger the post-cross cooldown
             -- so we don't immediately re-engage the inverse gizmo right at
             -- the landing point.
-            if now - _last_interact_time < INTERACT_RESPONSE_WINDOW then
+            local climbing = (now - _last_interact_time) < INTERACT_RESPONSE_WINDOW
+            if climbing then
                 console.print('[cross_traversal] trav gone post-interact — climb in progress')
                 _last_cross_time = now
             else
                 console.print('[cross_traversal] trav no longer interactable — yielding')
             end
-            reset_engagement()
+            reset_engagement(not climbing)
         end
         task.status = 'no_traversal_available'
         return
@@ -209,6 +281,7 @@ task.Execute = function ()
     if _engagement_start <= 0 then
         _engagement_start = get_time_since_inject()
         _engagement_pos = local_player:get_position()
+        _engagement_gizmo_key = gizmo_key(trav)
         console.print(string.format(
             '[cross_traversal] engaged %s at dist=%.1f',
             trav:get_skin_name(), trav_dist))
@@ -241,7 +314,7 @@ task.Execute = function ()
                     -- Trigger post-cross cooldown so we don't immediately
                     -- re-engage the same unusable gizmo.
                     _last_cross_time = now
-                    reset_engagement()
+                    reset_engagement(true)
                     return
                 end
             end

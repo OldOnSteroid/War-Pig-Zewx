@@ -26,14 +26,6 @@ local MAX_DISABLE_DEFER_SECONDS = 120
 -- landed, otherwise we retry warplan.teleport_to_activity() and check again.
 local TELEPORT_CHECK_INTERVAL = 3.0
 
--- Helltide chase: while we have the helltide buff and HelltideRevampedPlugin
--- owns the run, re-fire warplan.teleport_to_activity() every interval to
--- chase the next event spawn. Helltide events are wave-based — once a wave
--- clears, HR doesn't always re-target the next event spot fast enough and
--- the player stands idle. Gated to between-wave windows (no nearby enemies)
--- so we don't interrupt the channel mid-fight.
-local HELLTIDE_CHASE_INTERVAL = 4.0
-
 -- Hold time AFTER the incoming activity first appears in the matched set.
 -- Stops us from pressing Tab the same tick the previous WarPlan unmatched —
 -- the next WarPlan (e.g. TurnIn) typically lands ~1 second later, and the
@@ -197,10 +189,6 @@ local teleport_holding_logged = false
 -- so cold-start fires exactly once. Reset by release_all().
 local had_active_session = false
 
--- Last time the helltide-chase block fired warplan.teleport_to_activity().
--- Paces the between-waves re-target so we don't spam the channel.
-local last_helltide_chase_at = -math.huge
-
 -- Scans all actors for a given skin name. Used by arrived_when predicates so
 -- the orchestrator can confirm "we are at the quest destination" without
 -- importing plugin-specific utils modules.
@@ -312,46 +300,71 @@ local function enemies_near_player()
     return false
 end
 
--- Reaper kill tracker. Reaper only exposes a monotonically-increasing
--- total_runs counter, so we snapshot it at enable time and treat any increase
--- after that as "boss died this run". The 60s post-kill defer covers loot
--- pickup, crafting-mat opening, and travel back to town.
-local reaper_kill = { baseline = nil, kill_time = nil }
+-- Reaper run-once tracker. Reaper v1.9+ exposes
+-- ReaperPlugin.run_once(boss_id, run_type, on_complete): a callback fires
+-- after Reaper kills the boss, loots, and returns to town (just before it
+-- self-disables). We register a callback per request and flip `complete`
+-- true when it fires; disable_when reads that flag.
+--
+-- run_id is bumped on every reset so a stale callback from a prior run_once
+-- cannot mark a fresh run done. Specifically: when the boss pattern changes
+-- mid-run, the old run_once is overwritten in Reaper's `run_once_callback`
+-- slot (run_once just reassigns it), but if the new run_once is queued
+-- before the orchestrator processes the change, the captured rid in the
+-- old closure still wouldn't match the new run_id — so even a stray
+-- invocation is a no-op.
+local reaper_run_once = { complete = false, run_id = 0 }
 
-local function reaper_kill_tick()
-    local p = _G.ReaperPlugin
-    if not p or type(p.status) ~= 'function' then return end
-    local ok, s = pcall(p.status)
-    if not ok or type(s) ~= 'table' then return end
-    local total = s.total_runs or 0
-    if reaper_kill.baseline == nil then
-        reaper_kill.baseline = total
-        return
-    end
-    if total > reaper_kill.baseline then
-        reaper_kill.kill_time = get_time_since_inject()
-        reaper_kill.baseline  = total
+-- Altar-loop watchdog: if Reaper's "Interact Altar" task is still the active
+-- task >30s after we first saw it in this run_once session, the single-shot
+-- lockout inside Reaper has failed (typical cause: the altar interact never
+-- registered, leaving tracker.altar_activated=false so the
+-- EXTERNAL_LOCKOUT_DELAY clock never starts). Force-disable Reaper to unblock
+-- the orchestrator handoff. Reset on every new run_once and on global reset.
+local ALTAR_WATCHDOG_COOLDOWN = 30.0
+-- Extra hold (beyond the normal TRANSITION_GAP_SECONDS) before the next
+-- activity's teleport fires, applied only when the watchdog force-disabled
+-- Reaper. Reaper may still be mid-channel (interact_object spam, mounted,
+-- mid-attack) when we yank the toggle; an extra beat lets the in-game state
+-- settle before warplan.teleport_to_activity() races it.
+local REAPER_WATCHDOG_TELEPORT_HOLD = 8.0
+local reaper_altar_watchdog = {
+    first_seen_at = nil,
+    triggered     = false,
+    hold_until    = 0,
+}
+
+local function reset_reaper_run_once()
+    reaper_run_once.complete = false
+    reaper_run_once.run_id   = (reaper_run_once.run_id or 0) + 1
+    reaper_altar_watchdog.first_seen_at = nil
+    reaper_altar_watchdog.triggered     = false
+    reaper_altar_watchdog.hold_until    = 0
+end
+
+local function make_reaper_callback()
+    local rid = reaper_run_once.run_id
+    return function()
+        if rid ~= reaper_run_once.run_id then return end
+        reaper_run_once.complete = true
     end
 end
 
-local function reset_reaper_kill_baseline()
-    local p = _G.ReaperPlugin
-    if p and type(p.status) == 'function' then
-        local ok, s = pcall(p.status)
-        if ok and type(s) == 'table' then
-            reaper_kill.baseline = s.total_runs or 0
-        else
-            reaper_kill.baseline = 0
-        end
+local function reaper_run_boss(p, boss_id)
+    reset_reaper_run_once()
+    if type(p.run_once) == 'function' then
+        p.run_once(boss_id, nil, make_reaper_callback())
     else
-        reaper_kill.baseline = 0
+        -- Reaper < v1.9: no completion signal. Falling back to run_boss leaves
+        -- disable_when stuck on false; max_disable_defer_seconds (per-entry)
+        -- becomes the only force-disable path.
+        console.print('[WarPigs] WARNING: ReaperPlugin.run_once unavailable (need Reaper v1.9+) — falling back to run_boss')
+        p.run_boss(boss_id)
     end
-    reaper_kill.kill_time = nil
 end
 
-local function reaper_kill_disable_when()
-    if reaper_kill.kill_time == nil then return false end
-    return get_time_since_inject() - reaper_kill.kill_time >= 60
+local function reaper_run_once_disable_when()
+    return reaper_run_once.complete == true
 end
 
 -- Map keys are matched as PLAIN SUBSTRINGS against the names of active
@@ -531,33 +544,39 @@ orchestrator.quest_plugin_map = {
     -- "Log ALL quests" mode and rename as needed.
     WarPlans_QST_BossLair_Andariel = {  -- CONFIRMED
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('andariel') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'andariel') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Harby = {     -- CONFIRMED (harbinger)
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('harbinger') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'harbinger') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Duriel = {    -- guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('duriel') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'duriel') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Varshan = {   -- guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('varshan') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'varshan') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_PenitentKnight = {  -- CONFIRMED (grigoire)
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('grigoire') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'grigoire') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Zir = {  -- CONFIRMED (log 2026-05-03: id=2317384)
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('zir') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'zir') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     -- Beast in Ice: asset name is Boss_WT4_MegaDemon, but quests typically use
     -- the display name (per Harby/PenitentKnight precedent). Listing multiple
@@ -567,43 +586,51 @@ orchestrator.quest_plugin_map = {
     -- containing WarPlans_QST_BossLair_*; trim the misses afterward.
     WarPlans_QST_BossLair_MegaDemon = {      -- asset-name guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('beast') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'beast') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Beast = {          -- display-name guess (also matches BeastInIce via substring)
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('beast') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'beast') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_BeastInIce = {     -- display-name (full) guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('beast') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'beast') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_IceBeast = {       -- guess (alternate word order)
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('beast') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'beast') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Wendigo = {        -- guess (lore name for Beast in Ice)
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('beast') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'beast') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Urivar = {    -- guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('urivar') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'urivar') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Butcher = {   -- guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('butcher') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'butcher') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
     WarPlans_QST_BossLair_Belial = {    -- guess
         plugin = 'ReaperPlugin',
-        enable = function(p) p.run_boss('belial') end,
-        disable_when = reaper_kill_disable_when,
+        enable = function(p) reaper_run_boss(p,'belial') end,
+        disable_when = reaper_run_once_disable_when,
+        max_disable_defer_seconds = 300,
     },
 }
 
@@ -712,7 +739,6 @@ local function plugin_enable(entry, reason)
         owned[entry.plugin] = true
         enable_blocked[entry.plugin] = nil
         last_enabled_reason[entry.plugin] = reason
-        if entry.plugin == 'ReaperPlugin' then reset_reaper_kill_baseline() end
         log('enabled ' .. entry.plugin .. ' (' .. (reason or '?') .. ')')
     else
         log('enable of ' .. entry.plugin .. ' did not result in enabled status — will retry next tick')
@@ -808,6 +834,41 @@ local turn_in_was_matched      = false
 local had_turn_in_complete     = false
 local pit_filler_active_logged = false   -- dedup the "filler engaged"/"yielded" logs
 
+local function check_reaper_altar_watchdog()
+    if reaper_altar_watchdog.triggered then return end
+    if type(_G.ReaperPlugin) ~= 'table' then return end
+    if type(_G.ReaperPlugin.status) ~= 'function' then return end
+
+    local ok, st = pcall(_G.ReaperPlugin.status)
+    if not ok or type(st) ~= 'table' then return end
+    -- Only police runs that WarPigs initiated. Standalone Reaper is the user's call.
+    if not st.enabled or not st.external then return end
+
+    local task_name = st.task and st.task.name
+    if task_name ~= 'Interact Altar' then return end
+
+    local now = get_time_since_inject()
+    if not reaper_altar_watchdog.first_seen_at then
+        reaper_altar_watchdog.first_seen_at = now
+        log(string.format('reaper altar watchdog: first Interact Altar at %.1f', now))
+        return
+    end
+
+    local elapsed = now - reaper_altar_watchdog.first_seen_at
+    if elapsed > ALTAR_WATCHDOG_COOLDOWN then
+        reaper_altar_watchdog.triggered  = true
+        reaper_altar_watchdog.hold_until = now + REAPER_WATCHDOG_TELEPORT_HOLD
+        log(string.format(
+            'reaper altar watchdog: Interact Altar still active %.0fs after first sighting — single-shot lockout failed, force-disabling Reaper (holding next teleport %.0fs extra)',
+            elapsed, REAPER_WATCHDOG_TELEPORT_HOLD))
+        if type(_G.ReaperPlugin.clear_external) == 'function' then
+            pcall(_G.ReaperPlugin.clear_external)
+        end
+        pcall(_G.ReaperPlugin.disable)
+        reaper_run_once.complete = true
+    end
+end
+
 function orchestrator.tick()
     if settings.log_all_quests then dump_all_quests() end
 
@@ -853,10 +914,7 @@ function orchestrator.tick()
         was_dead = false
     end
 
-    -- Always sample Reaper kill state, even when no boss quest is currently
-    -- matched, so reaper_kill_disable_when() has accurate data the moment a
-    -- boss quest disappears.
-    reaper_kill_tick()
+    check_reaper_altar_watchdog()
 
     local active_names = get_active_quest_names()
     local now          = get_time_since_inject()
@@ -1233,8 +1291,10 @@ function orchestrator.tick()
         local in_helltide_combat = has_helltide_buff() and enemies_near_player()
 
         local has_pending = next(pending_disable) ~= nil
+        local watchdog_hold_active = reaper_altar_watchdog.hold_until > now
         local ready = has_incoming and incoming_settled and alfred_done
             and not has_pending and not in_helltide_combat
+            and not watchdog_hold_active
         if not ready then
             local reason
             if not has_incoming then
@@ -1246,6 +1306,9 @@ function orchestrator.tick()
                 reason = 'Alfred busy (loot/salvage in progress)'
             elseif in_helltide_combat then
                 reason = 'in helltide combat — waiting for area to clear before teleport'
+            elseif watchdog_hold_active then
+                reason = string.format('reaper watchdog post-disable hold (%.1fs left)',
+                    reaper_altar_watchdog.hold_until - now)
             else
                 local left = TELEPORT_INCOMING_SETTLE - (now - teleport_incoming_first_seen)
                 reason = string.format('settling incoming (%.1fs left)', left)
@@ -1258,39 +1321,54 @@ function orchestrator.tick()
             teleport_pending             = false
             teleport_incoming_first_seen = nil
             teleport_holding_logged      = false
-            -- Decide whether to begin the via-Temis-Alfred preamble. We always
-            -- want to detour through Temis + run Alfred between activities, EXCEPT
-            -- when teleport_to_waypoint isn't available on this host (then we
-            -- jump straight to the warplan-teleport / skip decision below).
-            local can_temis_detour = type(teleport_to_waypoint) == 'function'
-            if can_temis_detour and in_temis() then
-                -- Already in Temis: skip the waypoint hop and trigger Alfred now.
-                if alfred_trigger_now() then
-                    teleport_transition.state             = 'TEMIS_ALFRED'
-                    teleport_transition.started_at        = now
-                    teleport_transition.alfred_fired_at   = now
-                    teleport_transition.alfred_was_busy   = false
-                    teleport_transition.alfred_picked_up  = false
-                    teleport_transition.settle_started_at = nil
-                    log('via-Temis preamble: already in Temis — Alfred triggered')
+            -- If incoming is helltide AND HelltideRevamped is already running
+            -- OR we're already inside a helltide zone: skip the entire teleport
+            -- sequence (including the via-Temis preamble). HR drives its own
+            -- navigation in-zone, and yanking the player to Temis just to
+            -- warplan-teleport back races with HR's chest/event/teleport calls.
+            -- The via-Temis arrived_when fallback can't catch this case because
+            -- the preamble teleports us out of helltide before arrived_when
+            -- (has_helltide_buff) is evaluated.
+            if incoming_is_helltide(wants)
+                and (is_plugin_on('HelltideRevampedPlugin') or has_helltide_buff())
+            then
+                log('teleport skipped — incoming is helltide and HR is already running / in helltide zone')
+                teleport_transition.state = 'IDLE'
+            else
+                -- Decide whether to begin the via-Temis-Alfred preamble. We always
+                -- want to detour through Temis + run Alfred between activities, EXCEPT
+                -- when teleport_to_waypoint isn't available on this host (then we
+                -- jump straight to the warplan-teleport / skip decision below).
+                local can_temis_detour = type(teleport_to_waypoint) == 'function'
+                if can_temis_detour and in_temis() then
+                    -- Already in Temis: skip the waypoint hop and trigger Alfred now.
+                    if alfred_trigger_now() then
+                        teleport_transition.state             = 'TEMIS_ALFRED'
+                        teleport_transition.started_at        = now
+                        teleport_transition.alfred_fired_at   = now
+                        teleport_transition.alfred_was_busy   = false
+                        teleport_transition.alfred_picked_up  = false
+                        teleport_transition.settle_started_at = nil
+                        log('via-Temis preamble: already in Temis — Alfred triggered')
+                    else
+                        -- Alfred not loaded/enabled — go straight to the warplan
+                        -- teleport / skip decision (start_warplan_teleport below).
+                        log('via-Temis preamble: Alfred not loaded/enabled — skipping Alfred step')
+                        start_warplan_teleport(wants, now)
+                    end
+                elseif can_temis_detour then
+                    if (now - teleport_transition.last_temis_tp) >= TEMIS_TELEPORT_DEBOUNCE then
+                        teleport_to_waypoint(TEMIS_WP)
+                        teleport_transition.last_temis_tp = now
+                    end
+                    teleport_transition.state      = 'TO_TEMIS'
+                    teleport_transition.started_at = now
+                    log('via-Temis preamble: teleport_to_waypoint(Temis) sent')
                 else
-                    -- Alfred not loaded/enabled — go straight to the warplan
-                    -- teleport / skip decision (start_warplan_teleport below).
-                    log('via-Temis preamble: Alfred not loaded/enabled — skipping Alfred step')
+                    -- No teleport_to_waypoint on this host — fall back to the original
+                    -- behaviour (warplan teleport directly or skip).
                     start_warplan_teleport(wants, now)
                 end
-            elseif can_temis_detour then
-                if (now - teleport_transition.last_temis_tp) >= TEMIS_TELEPORT_DEBOUNCE then
-                    teleport_to_waypoint(TEMIS_WP)
-                    teleport_transition.last_temis_tp = now
-                end
-                teleport_transition.state      = 'TO_TEMIS'
-                teleport_transition.started_at = now
-                log('via-Temis preamble: teleport_to_waypoint(Temis) sent')
-            else
-                -- No teleport_to_waypoint on this host — fall back to the original
-                -- behaviour (warplan teleport directly or skip).
-                start_warplan_teleport(wants, now)
             end
         end
     end
@@ -1474,39 +1552,6 @@ function orchestrator.tick()
         end
     end
 
-    -- ── HELLTIDE CHASE ──────────────────────────────────────────────────────
-    -- Helltide events spawn monsters in waves at multiple locations across the
-    -- zone. Once a wave clears, HelltideRevamped doesn't always re-target the
-    -- next event spot fast enough — the player stands idle until mobs respawn
-    -- locally. While we have the helltide buff and HR owns the run, re-fire
-    -- warplan.teleport_to_activity() every HELLTIDE_CHASE_INTERVAL between
-    -- waves (no nearby enemies) to chase the next active event.
-    --
-    -- Bypasses the orchestrator's teleport state machine on purpose: this is
-    -- in-zone re-targeting, not a handoff, so we don't want via-Temis preamble
-    -- or settle gates here. Still gated on state==IDLE so we never collide
-    -- with a managed handoff teleport in flight.
-    if owned['HelltideRevampedPlugin']
-        and teleport_transition.state == 'IDLE'
-        and not teleport_pending
-        and next(pending_disable) == nil
-        and has_helltide_buff()
-        and not enemies_near_player()
-        and (now - last_helltide_chase_at) >= HELLTIDE_CHASE_INTERVAL
-    then
-        if _G.warplan and type(warplan.teleport_to_activity) == 'function' then
-            local ok = pcall(warplan.teleport_to_activity)
-            last_helltide_chase_at = now
-            if ok then
-                log(string.format(
-                    'helltide chase: warplan.teleport_to_activity() (between-waves re-target, every %.1fs)',
-                    HELLTIDE_CHASE_INTERVAL))
-            else
-                log('helltide chase: warplan.teleport_to_activity() threw — will retry')
-            end
-        end
-    end
-
     -- ── ENABLE GATE ─────────────────────────────────────────────────────────
     -- Don't start the next plugin while:
     --   (a) any plugin's disable is still deferred (outgoing not finished), or
@@ -1612,7 +1657,6 @@ function orchestrator.release_all()
     teleport_transition.alfred_picked_up  = false
     teleport_transition.settle_started_at = nil
     teleport_transition.helltide_hold_logged = false
-    last_helltide_chase_at   = -math.huge
     had_active_session       = false
     -- Filler-pit state — re-arm only after the next session sees a turn-in.
     turn_in_was_matched      = false
@@ -1622,6 +1666,8 @@ function orchestrator.release_all()
     last_disabled_plugin     = nil
     last_disabled_at         = -math.huge
     last_disabled_reason     = nil
+    -- Drop any pending Reaper run_once callback by bumping run_id; clear flag.
+    reset_reaper_run_once()
 end
 
 function orchestrator.get_status_line()

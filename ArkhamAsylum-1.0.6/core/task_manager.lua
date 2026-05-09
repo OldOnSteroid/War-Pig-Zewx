@@ -33,6 +33,13 @@ end
 local task_files = {
     'teleport_cerrigar',
     'd4assistant',
+    -- use_burden_altar runs ABOVE consume_chorons_soul AND upgrade_glyph: the
+    -- Choron's Burden Receptacle spawns post-boss and grants one extra glyph
+    -- upgrade chance on interact. It must fire before upgrade_glyph (which
+    -- would consume chances) and before consume_chorons_soul (which converts
+    -- spare chances to XP). The altar disappears on success so shouldExecute
+    -- naturally yields the chain to upgrade_glyph / consume_chorons_soul.
+    'use_burden_altar',
     -- consume_chorons_soul runs ABOVE upgrade_glyph: the soul converts unspent
     -- upgrade chances into XP, so if upgrade_glyph fired first it would burn
     -- through the chances on glyphs instead.  When the soul setting is off
@@ -54,6 +61,11 @@ local task_files = {
     -- handles "remembered hunt" — pathing back to the last known boss position
     -- after death/revive without exploring.
     'kill_boss',
+    -- pickup_heart_of_stone runs after kill_boss (so we don't abandon a boss
+    -- fight) but before portal/kill_monster/explore_pit so a present Choron's
+    -- Burden carryable preempts floor descent and trash chasing. Detects from
+    -- anywhere in the pit; no distance gate.
+    'pickup_heart_of_stone',
     -- portal must run before exit_pit: exit_pit fires on BatmobilePlugin.is_done(),
     -- which can happen on intermediate floors before the bot has descended. With portal
     -- higher priority, any visible non-back descend portal wins; on the final floor

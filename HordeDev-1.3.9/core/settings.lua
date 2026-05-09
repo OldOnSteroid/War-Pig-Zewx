@@ -25,6 +25,8 @@ local settings = {
     use_rushing_claw = true,
     use_soar = true,
     use_leap = true,
+    use_nether_step = true,
+    use_rampage = true,
     pick_pylon_delay = 1.5,
     open_chest_delay = 1.5,
     open_ga_chest_delay = 3,
@@ -66,6 +68,8 @@ function settings:update_settings()
     settings.use_soar = gui.elements.use_soar:get()
     settings.use_rushing_claw = gui.elements.use_rushing_claw:get()
     settings.use_leap = gui.elements.use_leap:get()
+    settings.use_nether_step = gui.elements.use_nether_step:get()
+    settings.use_rampage = gui.elements.use_rampage:get()
     settings.pick_pylon_delay = gui.elements.pick_pylon_delay:get()
     settings.open_chest_delay = gui.elements.open_chest_delay:get()
     settings.open_ga_chest_delay = gui.elements.open_ga_chest_delay:get()

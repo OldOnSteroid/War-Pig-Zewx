@@ -354,6 +354,18 @@ local get_portal = function ()
     return nil
 end
 task.shouldExecute = function ()
+    -- Reset-timer override: once exit_pit's hard deadline has fired, stop
+    -- pulling the player around. Portal task's force_move (within 7u) and
+    -- long_path retries cancel the teleport_to_waypoint channel each frame,
+    -- so even with exit_pit's debounce the player never actually leaves the
+    -- pit. Yield priority to exit_pit until it gets us out.
+    if utils.exit_pit_forced() then
+        if _long_path_target ~= nil then
+            BatmobilePlugin.stop_long_path(plugin_label)
+            _long_path_target = nil
+        end
+        return false
+    end
     if not utils.player_in_pit() then
         -- Pit-exit cleanup: wipe death-recovery state here.  Without this, a
         -- recovery target armed in the previous pit run survives across

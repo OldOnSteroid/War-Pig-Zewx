@@ -53,8 +53,10 @@ local get_closest_enemies = function ()
     local closest_enemy, closest_enemy_dist
     local closest_elite, closest_elite_dist
     local closest_champ, closest_champ_dist
+    local closest_goblin, closest_goblin_dist
     for _, enemy in pairs(enemies) do
-        if ignore_list[enemy:get_skin_name()] then goto continue end
+        local skin = enemy:get_skin_name()
+        if ignore_list[skin] then goto continue end
         if is_enemy_unreachable(enemy:get_position()) then goto continue end
         -- Skip enemies on a different floor level (different Z) — they're only reachable
         -- via a traversal, which the pathfinder can't model. Targeting them causes pathfind
@@ -82,14 +84,19 @@ local get_closest_enemies = function ()
                 closest_champ = enemy
                 closest_champ_dist = dist
             end
+            if settings.chase_goblin and skin and string.find(skin, "Goblin") and
+                (closest_goblin_dist == nil or dist < closest_goblin_dist)
+            then
+                closest_goblin = enemy
+                closest_goblin_dist = dist
+            end
         end
         ::continue::
     end
-    return closest_enemy, closest_elite, closest_champ
+    return closest_enemy, closest_elite, closest_champ, closest_goblin
 end
 
 task.shouldExecute = function ()
-    if settings.speed_mode then return false end
     -- Glyphstone present = boss already dead. Player is invulnerable within ~8 of it,
     -- so don't peel off to chase trash and risk drifting out of range / losing the gizmo.
     -- upgrade_glyph keeps us pinned during upgrades; exit_pit takes over after.
@@ -100,9 +107,14 @@ task.shouldExecute = function ()
     -- anchor-return is handled by explore_pit (lower priority than this task,
     -- so we yield by returning false here).
     if tracker.boss_dead then return false end
-    local enemy, elite, champion = get_closest_enemies()
-    return (enemy ~= nil or elite ~= nil or champion ~= nil) and
-        utils.player_in_pit()
+    if not utils.player_in_pit() then return false end
+    local enemy, elite, champion, goblin = get_closest_enemies()
+    -- Speed mode skips trash but still detours for goblins — they're rare and
+    -- worth the brief stop. Without this, chase_goblin never fires in speed_mode.
+    if settings.speed_mode then
+        return goblin ~= nil
+    end
+    return enemy ~= nil or elite ~= nil or champion ~= nil or goblin ~= nil
 end
 task.Execute = function ()
     local local_player = get_local_player()
@@ -112,8 +124,8 @@ task.Execute = function ()
     settings.orb_set_clear(true)
     settings.orb_set_block(true)
 
-    local enemy, elite, champion = get_closest_enemies()
-    local target = champion or elite or enemy
+    local enemy, elite, champion, goblin = get_closest_enemies()
+    local target = goblin or champion or elite or enemy
 
     if target and utils.distance(local_player, target) > 1 then
         local target_pos = target:get_position()

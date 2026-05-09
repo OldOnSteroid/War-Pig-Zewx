@@ -746,19 +746,11 @@ local function maiden_reset_cycle()
     maiden_insert_attempt_t       = nil
 end
 
--- Returns the maiden altar position for the current zone, or nil if unsupported.
-local function get_maiden_pos()
-    local world = get_current_world()
-    if not world then return nil end
-    local zname = world:get_current_zone_name()
-    if not zname then return nil end
-    return enums.maiden_positions and enums.maiden_positions[zname] or nil
-end
-
--- find_maiden_altar / should_do_maiden are declared as forward locals here
--- so check_events (which calls should_do_maiden) and the state handlers
--- (which call both) can see them. The actual bodies are assigned below
--- get_cached_actors — see [maiden helpers — bodies] block.
+-- get_maiden_pos / find_maiden_altar / should_do_maiden are declared as forward
+-- locals here so check_events and the state handlers can see them. Bodies live
+-- in the [maiden helpers — bodies] block below get_cached_actors so they can
+-- scan actors via the shared cache.
+local get_maiden_pos
 local find_maiden_altar
 local should_do_maiden
 
@@ -809,6 +801,33 @@ find_maiden_altar = function(max_dist)
         end
     end
     return best, best_dist
+end
+
+-- Returns the maiden altar position to route to, or nil if unsupported.
+-- Order:
+--   1. Pinned `maiden_pos` (set on entry into MOVING_TO_MAIDEN/AT_MAIDEN) while
+--      we're within 200u — keeps us locked on the chosen site even when its
+--      altars momentarily go non-interactable (heart inserted, boss spawning).
+--   2. Hardcoded zone coord if within 200u of player — canonical pile is
+--      effectively "right here", commit to it without scanning.
+--   3. Zone-wide actor scan for the closest INTERACTABLE altar — covers zones
+--      where the active pile differs from the canonical coord.
+--   4. Hardcoded zone coord as last fallback (may be nil for unsupported zones).
+get_maiden_pos = function()
+    local world = get_current_world()
+    if not world then return nil end
+    local zname = world:get_current_zone_name()
+    if not zname then return nil end
+    local hardcoded = enums.maiden_positions and enums.maiden_positions[zname] or nil
+    if maiden_pos and utils.distance_to(maiden_pos) < 200 then
+        return maiden_pos
+    end
+    if hardcoded and utils.distance_to(hardcoded) < 200 then
+        return hardcoded
+    end
+    local altar = find_maiden_altar()
+    if altar then return altar:get_position() end
+    return hardcoded
 end
 
 -- Single source of truth for "should we be doing maiden right now?"

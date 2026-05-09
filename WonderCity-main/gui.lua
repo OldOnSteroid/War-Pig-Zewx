@@ -133,6 +133,7 @@ gui.elements = {
     exit_undercity_delay = slider_int:new(0, 300, 10, get_hash(plugin_label .. '_' .. 'exit_undercity_delay')),
     exit_mode = combo_box:new(0, get_hash(plugin_label .. '_' .. 'exit_mode')),
     loot_obols = create_checkbox(true, 'loot_obols'),
+    chase_goblin = create_checkbox(true, 'chase_goblin'),
     max_enticement = slider_int:new(0, 9, 5, get_hash(plugin_label .. '_' .. 'max_enticement')),
     enticement_timeout = slider_int:new(0, 10, 4, get_hash(plugin_label .. '_' .. 'enticement_timeout')),
     beacon_timeout = slider_int:new(0, 30, 10, get_hash(plugin_label .. '_' .. 'beacon_timeout')),
@@ -215,6 +216,7 @@ gui.render = function ()
         gui.elements.enticement_timeout:render('Enticement delay (s)', 'time in seconds to wait before leaving enticement')
         gui.elements.beacon_timeout:render('Beacon delay (s)', 'time in seconds to wait before leaving beacon')
         gui.elements.loot_obols:render('Loot Obols', 'Loot Obols')
+        gui.elements.chase_goblin:render('Chase goblin', 'Prioritize chasing/killing treasure & chest goblins. On by default.')
         gui.elements.manage_orbwalker:render('Manage orbwalker', 'When enabled, this script will toggle orbwalker clear/block-movement during undercity tasks. Off by default — leaves orbwalker fully under your rotation\'s control.')
         if gui.elements.manage_orbwalker:get() then
             gui.elements.skip_monsters:render('Skip monsters', 'Disable orbwalker until reaching an enticement, beacon, elite or boss')

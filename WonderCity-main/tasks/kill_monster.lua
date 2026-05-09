@@ -33,7 +33,7 @@ local get_closest_enemies = function ()
         if ignore_list[enemy:get_skin_name()] then goto continue end
         local health = enemy:get_current_health()
         local dist = utils.distance(player_pos, enemy)
-        if prority_list[enemy:get_skin_name()] and
+        if settings.chase_goblin and prority_list[enemy:get_skin_name()] and
             (closest_priority_dist == nil or dist < closest_priority_dist)
         then
             closest_priority = enemy
