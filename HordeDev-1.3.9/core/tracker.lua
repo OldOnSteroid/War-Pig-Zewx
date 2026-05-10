@@ -55,4 +55,33 @@ function tracker.clear_key(key)
     tracker[key] = nil
 end
 
+-- Wipes all tracker state that needs to be cleared between horde runs.
+-- Called from InfernalHordesPlugin.enable() so a WarPigs-driven mid-BSK
+-- re-enable doesn't inherit the previous run's chest flags and skip looting.
+-- The normal Library->sigil flow already resets chest state via start_dungeon's
+-- reset_chest_flags(), so this is a superset that's idempotent on first enable.
+function tracker.fresh_run_reset()
+    console.print("[tracker] fresh_run_reset")
+    tracker.finished_chest_looting    = false
+    tracker.ga_chest_opened           = false
+    tracker.talisman_chest_opened     = false
+    tracker.selected_chest_opened     = false
+    tracker.gold_chest_opened         = false
+    tracker.has_salvaged              = false
+    tracker.needs_salvage             = false
+    tracker.victory_lap               = false
+    tracker.victory_positions         = nil
+    tracker.locked_door_found         = false
+    tracker.boss_killed               = false
+    tracker.horde_opened              = false
+    tracker.sigil_used                = false
+    tracker.first_run                 = false
+    tracker.keep_items                = 0
+    tracker.teleported_from_town      = false
+    tracker.start_dungeon_time        = nil
+    tracker.exit_horde_start_time     = nil
+    tracker.has_entered               = false
+    tracker.clear_runtime_timers()
+end
+
 return tracker

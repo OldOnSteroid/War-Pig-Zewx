@@ -32,9 +32,21 @@ end
 
 -- Set Global access for other plugins
 local tracker = require "core.tracker"
+local open_chests_task = require "tasks.open_chests"
 InfernalHordesPlugin = {
     enable = function ()
         console.print('HORDE ACTIVATING')
+        -- Wipe leftover run state before activating. WarPigs re-enables the
+        -- plugin mid-BSK after a prior wave; without this, finished_chest_looting
+        -- and the per-chest opened flags survive and the next run skips
+        -- open_chests entirely (exit_horde fires the moment the player is back
+        -- in BSK). fresh_run_reset() also covers the normal Library->sigil flow
+        -- as a no-op because start_dungeon's reset_chest_flags() runs anyway.
+        tracker.fresh_run_reset()
+        -- open_chests has its own internal state machine (current_state etc.)
+        -- that finishes at chest_state.FINISHED on the prior run; reset it so
+        -- the SM re-enters at INIT.
+        open_chests_task:reset()
         gui.elements.main_toggle:set(true)
         gui.elements.keybind_toggle:set(true)
         settings:update_settings()

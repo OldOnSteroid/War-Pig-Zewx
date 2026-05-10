@@ -1,5 +1,5 @@
 local gui = {}
-local version = "v0.4"
+local version = "v2.0.1"
 local plugin_label = "helltide_revamped"
 
 local function create_checkbox(value, key)

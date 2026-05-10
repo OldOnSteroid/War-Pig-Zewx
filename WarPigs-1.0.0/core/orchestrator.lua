@@ -108,6 +108,11 @@ local TEMIS_WP                = 0x1CE51E      -- Skov_Temis waypoint sno
 local TEMIS_ZONE              = 'Skov_Temis'
 local TEMIS_TELEPORT_TIMEOUT  = 30.0          -- retry the waypoint hop after this
 local TEMIS_TELEPORT_DEBOUNCE = 6.0           -- min gap between waypoint calls (channel ≈ 5s)
+-- Fast-retry cadence used ONLY when the player is stuck in a helltide zone
+-- after the helltide quest ended with HR disabled — channel is constantly
+-- broken by the 10s monster spawns, so we re-fire aggressively to catch a
+-- damage-free window. Overrides both the timeout and the debounce.
+local TEMIS_LINGER_RETRY_INTERVAL = 3.0
 -- Alfred dwell window. After firing trigger_tasks we need to give Alfred's main
 -- loop a beat to pick up the trigger and flip its busy/trigger_tasks flag —
 -- otherwise alfred_idle() returns true the instant we trigger and we leave the
@@ -709,6 +714,21 @@ local function is_plugin_on(plugin_name)
     return owned[plugin_name] == true
 end
 
+-- Predicate: helltide quest just ended (or never was incoming) but the player
+-- is still in the helltide zone with HR disabled. In this state the 10s
+-- monster spawns hit the player, the via-Temis preamble's teleport channel
+-- gets cancelled by damage, and HR isn't around to clear the area. Used to
+-- (a) bypass the in_helltide_combat hold so the preamble is allowed to fire
+-- even while taking hits, and (b) shorten the TO_TEMIS retry cadence to
+-- TEMIS_LINGER_RETRY_INTERVAL (3s) so we keep restarting the channel until
+-- one attempt lands between hits.
+local function helltide_lingering_post_quest(wants_)
+    if not has_helltide_buff() then return false end
+    if is_plugin_on('HelltideRevampedPlugin') then return false end
+    if incoming_is_helltide(wants_) then return false end
+    return true
+end
+
 local function plugin_enable(entry, reason)
     local p = _G[entry.plugin]
     if not p then
@@ -1288,7 +1308,11 @@ function orchestrator.tick()
         -- plugin to clear nearby enemies before firing teleport_to_activity().
         -- Gated on has_helltide_buff() so town-to-town handoffs (Pit/Undercity)
         -- aren't affected — the player is in town, no enemies, no-op.
+        -- Bypassed when the helltide quest is over and HR is disabled: nothing
+        -- is going to clear the area, so waiting is just waiting to die. The
+        -- TO_TEMIS state's fast-retry path handles channel breaks.
         local in_helltide_combat = has_helltide_buff() and enemies_near_player()
+            and not helltide_lingering_post_quest(wants)
 
         local has_pending = next(pending_disable) ~= nil
         local watchdog_hold_active = reaper_altar_watchdog.hold_until > now
@@ -1386,6 +1410,16 @@ function orchestrator.tick()
                 log('via-Temis preamble: arrived in Temis, Alfred not loaded/enabled — proceeding to warplan teleport')
                 start_warplan_teleport(wants, now)
             end
+        elseif helltide_lingering_post_quest(wants)
+            and (now - teleport_transition.last_temis_tp) >= TEMIS_LINGER_RETRY_INTERVAL
+        then
+            -- Helltide-lingering fast retry: the channel is being broken by
+            -- ongoing damage from the 10s monster spawns and HR is off, so
+            -- re-fire every 3s to keep retrying until one attempt lands.
+            log('via-Temis preamble: helltide-lingering fast retry — re-firing waypoint')
+            teleport_to_waypoint(TEMIS_WP)
+            teleport_transition.last_temis_tp = now
+            teleport_transition.started_at    = now
         elseif (now - teleport_transition.started_at) >= TEMIS_TELEPORT_TIMEOUT then
             if (now - teleport_transition.last_temis_tp) >= TEMIS_TELEPORT_DEBOUNCE then
                 log('via-Temis preamble: TO_TEMIS timeout — retrying waypoint')

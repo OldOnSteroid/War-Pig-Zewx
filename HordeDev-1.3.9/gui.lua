@@ -1,6 +1,6 @@
 local gui = {}
 local plugin_label = "infernal_horde"
-local version = "v1.3.9"
+local version = "v2.0.1"
 console.print("Lua Plugin - Infernal Hordes - Letrico - " .. version);
 
 local function create_checkbox(value, key)
