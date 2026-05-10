@@ -56,22 +56,46 @@ local function cinder_gate_active()
     return get_helltide_coin_cinders() > CINDER_CLEAR_OFF_THRESHOLD
 end
 
+-- Temporary override timestamp: until this time, force_orb_clear_for() callers
+-- want orbwalker clear ON regardless of the cinder gate. Used by chest combat
+-- detection so monsters can't park us at >149 cinders forever.
+local force_clear_until = -math.huge
+
+local function force_active()
+    return get_time_since_inject() <= force_clear_until
+end
+
 settings.orb_set_clear = function (v)
     if not settings.manage_orbwalker then return end
-    if v and cinder_gate_active() then
+    if v and cinder_gate_active() and not force_active() then
         v = false
     end
     orbwalker.set_clear_toggle(v)
 end
 
--- Tick driver: call from the main task pulse so the OFF state is asserted
--- even in non-kill states (EXPLORE_HELLTIDE, MOVING_TO_*, etc.) where nothing
--- would otherwise call orb_set_clear and a previously-ON toggle would persist.
+-- Tick driver: call from the main task pulse so the gate is asserted every
+-- frame, regardless of which state handler is running. Previously this only
+-- forced OFF above threshold, which left orbwalker stuck OFF after cinders
+-- dropped back below 150 (e.g. we just opened a chest) until the next state
+-- that explicitly called orb_set_clear(true). Now it's symmetric.
 settings.apply_cinder_orb_gate = function ()
     if not settings.manage_orbwalker then return end
-    if cinder_gate_active() then
+    if force_active() then
+        orbwalker.set_clear_toggle(true)
+    elseif cinder_gate_active() then
         orbwalker.set_clear_toggle(false)
+    else
+        orbwalker.set_clear_toggle(true)
     end
+end
+
+-- Force orbwalker clear ON for `seconds` regardless of the cinder gate. Used
+-- when monsters are interrupting a chest channel: we'd rather burn the cinders
+-- we don't need than stand there getting hit while never killing anything.
+settings.force_orb_clear_for = function (seconds)
+    if not settings.manage_orbwalker then return end
+    force_clear_until = get_time_since_inject() + (seconds or 5)
+    orbwalker.set_clear_toggle(true)
 end
 
 settings.orb_set_block = function (v)

@@ -166,6 +166,27 @@ local function in_bsk_world()
     return ok2 and type(wname) == 'string' and wname:find('BSK', 1, true) ~= nil
 end
 
+-- HordeDev is currently mid-chest. Chest interaction is fragile (channeled
+-- interact, VFX wait, loot wait, then "Trying next chest" → the next chest's
+-- MOVING_TO_CHEST). Any teleport_to_waypoint() fired during this window cancels
+-- the interact / yanks the player out of BSK and the run is lost. Even when
+-- chests_done() correctly defers HordeDev's disable, a teleport_pending armed
+-- earlier (prior plugin handoff, self-disable revive, cold start) plus the
+-- TO_TEMIS retry loop can still re-fire teleport_to_waypoint(Temis) while the
+-- chest task is running. This guard hard-blocks that window.
+--
+-- HordeDev's getState() returns "OPENING_CHESTS" iff the current task is
+-- "Open Chests" (HordeDev-1.3.9/main.lua), which spans the whole INIT →
+-- MOVING_TO_CHEST → OPENING_CHEST → WAITING_FOR_VFX → WAITING_FOR_LOOT →
+-- (next chest) cycle. When that returns true we refuse to (a) start the
+-- via-Temis preamble and (b) re-fire the TO_TEMIS retry teleport.
+local function horde_in_chest_opening()
+    local p = _G.InfernalHordesPlugin
+    if not p or type(p.getState) ~= 'function' then return false end
+    local ok, state = pcall(p.getState)
+    return ok and state == 'OPENING_CHESTS'
+end
+
 -- Resume Alfred if paused, then fire trigger_tasks. Returns true if a trigger
 -- was actually issued (Alfred loaded AND enabled). False means caller should
 -- skip the TEMIS_ALFRED dwell and go straight to the warplan teleport.
@@ -175,8 +196,18 @@ local function alfred_trigger_now()
     if type(alfred.get_status) == 'function' then
         local ok, s = pcall(alfred.get_status)
         if not (ok and type(s) == 'table' and s.enabled) then return false end
-        if s.paused and type(alfred.resume) == 'function' then pcall(alfred.resume) end
     end
+    -- Always call resume() before trigger_tasks. SteroidAlfredButler's
+    -- get_status() omits the paused field, so gating resume on s.paused leaves
+    -- a stale external_pause=true (set by a prior plugin's done-callback, e.g.
+    -- HelltideRevamped/tasks/alfred.lua reset() calling pause(plugin_label))
+    -- in place. With external_pause=true the Steroid Status task's
+    -- shouldExecute returns true every tick on tracker.external_pause and
+    -- monopolises task_manager.execute_tasks (single-task-per-pulse loop), so
+    -- the actual sell/salvage/stash tasks never run and Alfred sits showing
+    -- "Paused by WarPigs" forever. resume() is idempotent — safe to call when
+    -- not paused on either fork.
+    if type(alfred.resume) == 'function' then pcall(alfred.resume) end
     pcall(alfred.trigger_tasks, 'WarPigs')
     return true
 end
@@ -219,6 +250,8 @@ local teleport_pending = false
 local teleport_incoming_first_seen = nil
 -- Suppresses repeat "teleport holding — …" logs while waiting for predicates.
 local teleport_holding_logged = false
+-- Suppresses repeat "TO_TEMIS hold — HordeDev opening chests" log per hold window.
+local temis_hold_for_chest_logged = nil
 -- Tracks whether ANY plugin/task has been active under this WarPigs session.
 -- False until the first activity starts; switched true on first activation
 -- so cold-start fires exactly once. Reset by release_all().
@@ -784,6 +817,18 @@ local function plugin_enable(entry, reason)
     if not p then
         log('cannot enable ' .. entry.plugin .. ' — plugin not loaded')
         return
+    end
+    -- Force orbwalker clear ON before handing off to the next plugin. Some
+    -- plugins (HR cinder gate, Reaper boss approach, manual toggles) leave
+    -- clear OFF; the next plugin often assumes it starts ON and never
+    -- re-asserts it, so trash gets ignored for the entire run. Gated by
+    -- settings.manage_orbwalker so users who hand orbwalker control to their
+    -- rotation aren't disturbed.
+    if settings.manage_orbwalker and orbwalker and orbwalker.set_clear_toggle then
+        local ok = pcall(orbwalker.set_clear_toggle, true)
+        if not ok then
+            log('orbwalker.set_clear_toggle(true) threw before enabling ' .. entry.plugin)
+        end
     end
     -- Wrap enable() in pcall: a misbehaving plugin (e.g. HR.enable referencing
     -- a missing GUI element) used to crash the orchestrator and trigger an
@@ -1382,13 +1427,16 @@ function orchestrator.tick()
 
         local has_pending = next(pending_disable) ~= nil
         local watchdog_hold_active = reaper_altar_watchdog.hold_until > now
+        local horde_chesting = horde_in_chest_opening()
         local ready = has_incoming and incoming_settled and alfred_done
             and not has_pending and not in_helltide_combat
-            and not watchdog_hold_active
+            and not watchdog_hold_active and not horde_chesting
         if not ready then
             local reason
             if not has_incoming then
                 reason = 'no incoming activity yet'
+            elseif horde_chesting then
+                reason = 'HordeDev is opening chests — chest interact is fragile, refusing to fire Temis preamble'
             elseif has_pending then
                 local pname = next(pending_disable)
                 reason = 'waiting for ' .. tostring(pname) .. ' to finish (deferred disable)'
@@ -1476,6 +1524,20 @@ function orchestrator.tick()
                 log('via-Temis preamble: arrived in Temis, Alfred not loaded/enabled — proceeding to warplan teleport')
                 start_warplan_teleport(wants, now)
             end
+        elseif horde_in_chest_opening() then
+            -- The Temis channel was broken (combat in BSK / chest interact
+            -- yanked us back) and HordeDev is now mid-chest. Re-firing
+            -- teleport_to_waypoint(Temis) here would cancel the chest interact
+            -- channel, lose the chest, and abort the run. Hold all retries
+            -- (both the helltide-lingering fast retry and the timeout retry)
+            -- until HordeDev leaves the chest cycle. started_at is also bumped
+            -- so the timeout doesn't accumulate while we're holding — once
+            -- chests_done, the normal timeout cadence resumes from now.
+            if temis_hold_for_chest_logged ~= teleport_transition.started_at then
+                log('via-Temis preamble: TO_TEMIS hold — HordeDev is opening chests, refusing to retry waypoint')
+                temis_hold_for_chest_logged = teleport_transition.started_at
+            end
+            teleport_transition.started_at = now
         elseif helltide_lingering_post_quest(wants)
             and (now - teleport_transition.last_temis_tp) >= TEMIS_LINGER_RETRY_INTERVAL
         then
@@ -1791,6 +1853,7 @@ function orchestrator.release_all()
     teleport_pending             = false
     teleport_incoming_first_seen = nil
     teleport_holding_logged      = false
+    temis_hold_for_chest_logged  = nil
     teleport_transition.state             = 'IDLE'
     teleport_transition.started_at        = -math.huge
     teleport_transition.snap_world        = nil

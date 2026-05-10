@@ -47,9 +47,18 @@ local CHEST_MICROPARTIAL_PLEN_MAX  = 2             -- plen at or below this coun
 -- monster interrupting the open animation doesn't wipe a reachable chest.
 local CHEST_INTERACT_RANGE         = 6             -- meters: treat as "in interaction"
 local CHEST_STUCK_COMBAT_RANGE     = 25            -- meters: refresh stuck window if a hostile is this close
-local _chest_stuck_key  = nil
-local _chest_stuck_t    = 0
-local _chest_stuck_dist = math.huge
+-- When monsters are blocking a chest interaction, force orbwalker clear ON for
+-- this long (overrides the >149-cinders gate) so they actually get killed.
+-- Re-asserted every tick we still see blocking combat.
+local CHEST_COMBAT_FORCE_CLEAR_DURATION = 5.0
+-- Hard cap on consecutive combat-blocked time at a chest before we blacklist.
+-- Without this, the combat-refresh branch can stall forever if the rotation
+-- can't actually clear the mob (broken spec, glyph stone area, etc.).
+local CHEST_COMBAT_BLOCK_LIMIT     = 25.0
+local _chest_stuck_key      = nil
+local _chest_stuck_t        = 0
+local _chest_stuck_dist     = math.huge
+local _chest_combat_block_t = nil    -- when combat first blocked the current chest
 -- Micro-partial counter state (per-chest)
 local _chest_micropartial_count   = 0
 local _chest_micropartial_last_id = 0
@@ -85,6 +94,7 @@ local function chest_stuck_reset()
     _chest_stuck_dist = math.huge
     _chest_micropartial_count   = 0
     _chest_micropartial_last_id = 0
+    _chest_combat_block_t       = nil
     recall_state_reset()
 end
 
@@ -1427,6 +1437,10 @@ local helltide_task = {
                 BatmobilePlugin.reset_movement(plugin_label)
                 BatmobilePlugin.resume(plugin_label)
             end
+            -- Death may have left orbwalker clear off (e.g. cinder gate flipped
+            -- it during the run, or another plugin disabled it). Reassert ON
+            -- after revive so post-revive trash actually gets cleared.
+            settings.orb_set_clear(true)
         end
 
         if LooteerPlugin then
@@ -2414,24 +2428,68 @@ local helltide_task = {
         local now_t = get_time_since_inject()
         local hkey  = chest_key(found_chest, found_chest_position)
         if _chest_stuck_key ~= hkey then
-            _chest_stuck_key  = hkey
-            _chest_stuck_t    = now_t
-            _chest_stuck_dist = dist_to_saved
+            _chest_stuck_key      = hkey
+            _chest_stuck_t        = now_t
+            _chest_stuck_dist     = dist_to_saved
+            _chest_combat_block_t = nil
         elseif dist_to_saved <= CHEST_INTERACT_RANGE then
             -- At the chest — channeling, not stuck. Refresh the window so
             -- monster-interrupted opens don't blacklist a reachable chest.
             _chest_stuck_t    = now_t
             _chest_stuck_dist = dist_to_saved
+            -- If a hostile is interrupting the channel, force orbwalker clear
+            -- ON (overrides the >149-cinders gate) so combat actually clears
+            -- them — otherwise we sit there getting hit and never opening.
+            -- Cap the total combat-blocked time so a permanent block (mob
+            -- chain right on top of the chest) eventually blacklists it.
+            local kt = get_kill_target()
+            if kt and utils.distance_to(kt) <= CHEST_STUCK_COMBAT_RANGE then
+                settings.force_orb_clear_for(CHEST_COMBAT_FORCE_CLEAR_DURATION)
+                if not _chest_combat_block_t then _chest_combat_block_t = now_t end
+                if (now_t - _chest_combat_block_t) >= CHEST_COMBAT_BLOCK_LIMIT then
+                    console.print(string.format(
+                        "[HELLTIDE CHEST] %s combat-blocked at chest %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
+                        found_chest, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
+                    chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+                    found_chest = nil
+                    found_chest_position = nil
+                    pre_interact_cinders = nil
+                    chest_stuck_reset()
+                    clear_movement()
+                    self.current_state = helltide_state.EXPLORE_HELLTIDE
+                    return
+                end
+            else
+                _chest_combat_block_t = nil
+            end
         elseif dist_to_saved <= _chest_stuck_dist - CHEST_STUCK_PROGRESS then
-            _chest_stuck_t    = now_t
-            _chest_stuck_dist = dist_to_saved
+            _chest_stuck_t        = now_t
+            _chest_stuck_dist     = dist_to_saved
+            _chest_combat_block_t = nil
         elseif dist_to_saved <= CHEST_STUCK_RANGE
                 and (now_t - _chest_stuck_t) >= CHEST_STUCK_WINDOW then
             local kt = get_kill_target()
             if kt and utils.distance_to(kt) <= CHEST_STUCK_COMBAT_RANGE then
                 -- Combat near the player is blocking progress, not geometry.
-                -- Refresh the window so we don't blacklist a reachable chest
-                -- just because a monster intercepted us en route.
+                -- Force orbwalker clear ON (overrides the cinder gate) and
+                -- refresh the window so we don't blacklist a reachable chest
+                -- just because a monster intercepted us en route. Hard cap
+                -- via _chest_combat_block_t so we don't loop forever.
+                settings.force_orb_clear_for(CHEST_COMBAT_FORCE_CLEAR_DURATION)
+                if not _chest_combat_block_t then _chest_combat_block_t = now_t end
+                if (now_t - _chest_combat_block_t) >= CHEST_COMBAT_BLOCK_LIMIT then
+                    console.print(string.format(
+                        "[HELLTIDE CHEST] %s combat-blocked en route %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
+                        found_chest, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
+                    chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+                    found_chest = nil
+                    found_chest_position = nil
+                    pre_interact_cinders = nil
+                    chest_stuck_reset()
+                    clear_movement()
+                    self.current_state = helltide_state.EXPLORE_HELLTIDE
+                    return
+                end
                 _chest_stuck_t    = now_t
                 _chest_stuck_dist = dist_to_saved
             else
@@ -2605,6 +2663,7 @@ local helltide_task = {
             _chest_stuck_dist = dist
             _chest_micropartial_count   = 0
             _chest_micropartial_last_id = 0
+            _chest_combat_block_t       = nil
         elseif dist <= CHEST_INTERACT_RANGE then
             -- At the chest — channeling, not stuck. Refresh the window so
             -- monster-interrupted opens don't blacklist a reachable chest.
@@ -2613,15 +2672,58 @@ local helltide_task = {
             _chest_stuck_t            = now_t
             _chest_stuck_dist         = dist
             _chest_micropartial_count = 0
+            -- If a hostile is interrupting the channel, force orbwalker clear
+            -- ON (overrides the >149-cinders gate) and cap total combat-blocked
+            -- time so we eventually blacklist instead of standing here forever.
+            local kt = get_kill_target()
+            if kt and utils.distance_to(kt) <= CHEST_STUCK_COMBAT_RANGE then
+                settings.force_orb_clear_for(CHEST_COMBAT_FORCE_CLEAR_DURATION)
+                if not _chest_combat_block_t then _chest_combat_block_t = now_t end
+                if (now_t - _chest_combat_block_t) >= CHEST_COMBAT_BLOCK_LIMIT then
+                    console.print(string.format(
+                        "[CHEST RECALL] %s combat-blocked at chest %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
+                        entry.name, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
+                    chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                    if has_batmobile and BatmobilePlugin.stop_long_path then
+                        BatmobilePlugin.stop_long_path(plugin_label)
+                    end
+                    clear_movement()
+                    remembered_chest_target = nil
+                    chest_stuck_reset()
+                    self.current_state = helltide_state.EXPLORE_HELLTIDE
+                    return
+                end
+            else
+                _chest_combat_block_t = nil
+            end
         elseif dist <= _chest_stuck_dist - CHEST_STUCK_PROGRESS then
             -- Made meaningful progress; reset the window.
-            _chest_stuck_t    = now_t
-            _chest_stuck_dist = dist
+            _chest_stuck_t        = now_t
+            _chest_stuck_dist     = dist
+            _chest_combat_block_t = nil
         elseif dist <= CHEST_STUCK_RANGE
                 and (now_t - _chest_stuck_t) >= CHEST_STUCK_WINDOW then
             local kt = get_kill_target()
             if kt and utils.distance_to(kt) <= CHEST_STUCK_COMBAT_RANGE then
                 -- Combat near the player is blocking progress, not geometry.
+                -- Force orbwalker clear ON (overrides the cinder gate); hard
+                -- cap via _chest_combat_block_t so we don't refresh forever.
+                settings.force_orb_clear_for(CHEST_COMBAT_FORCE_CLEAR_DURATION)
+                if not _chest_combat_block_t then _chest_combat_block_t = now_t end
+                if (now_t - _chest_combat_block_t) >= CHEST_COMBAT_BLOCK_LIMIT then
+                    console.print(string.format(
+                        "[CHEST RECALL] %s combat-blocked en route %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
+                        entry.name, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
+                    chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                    if has_batmobile and BatmobilePlugin.stop_long_path then
+                        BatmobilePlugin.stop_long_path(plugin_label)
+                    end
+                    clear_movement()
+                    remembered_chest_target = nil
+                    chest_stuck_reset()
+                    self.current_state = helltide_state.EXPLORE_HELLTIDE
+                    return
+                end
                 _chest_stuck_t    = now_t
                 _chest_stuck_dist = dist
             else

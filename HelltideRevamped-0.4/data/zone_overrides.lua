@@ -25,6 +25,7 @@ local overrides = {
 -- Zones where the helltide task should never run (bot teleports away instead).
 local excluded_zones = {
     { world_name = "Sanctuary_Eastern_Continent", zone_name = "Hawe_ZakFort" },
+    { world_name = "Sanctuary_Eastern_Continent", zone_name = "Skov_Skartara" },
 }
 
 local M = {}

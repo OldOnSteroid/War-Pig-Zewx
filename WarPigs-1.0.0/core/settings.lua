@@ -7,6 +7,7 @@ local settings = {
     use_keybind     = false,
     use_teleport_transition = false,
     run_pit_after_turnin = false,
+    manage_orbwalker = false,
     verbose_logs    = false,
     log_all_quests  = false,
 }
@@ -16,6 +17,7 @@ settings.update_settings = function()
     settings.use_keybind    = gui.elements.use_keybind:get()
     settings.use_teleport_transition = gui.elements.use_teleport_transition:get()
     settings.run_pit_after_turnin = gui.elements.run_pit_after_turnin:get()
+    settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
     settings.verbose_logs   = gui.elements.verbose_logs:get()
     settings.log_all_quests = gui.elements.log_all_quests:get()
 end

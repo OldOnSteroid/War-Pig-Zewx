@@ -1,5 +1,5 @@
 local plugin_label = 'arkham_asylum'
-local plugin_version = '2.0.4'
+local plugin_version = '2.0.5'
 console.print("Lua Plugin - Arkham Asylum - Leoric - v" .. plugin_version)
 
 local gui = {}

@@ -1,5 +1,5 @@
 local plugin_label   = 'war_pigs'
-local plugin_version = '1.0.4'
+local plugin_version = '1.0.5'
 console.print('Lua Plugin - WarPigs - v' .. plugin_version)
 
 local gui = {}
@@ -22,6 +22,7 @@ gui.elements = {
     -- warplan.teleport_to_activity() and wait for the channel to settle.
     use_teleport_transition = create_checkbox(false, 'use_teleport_transition'),
     run_pit_after_turnin    = create_checkbox(false, 'run_pit_after_turnin'),
+    manage_orbwalker        = create_checkbox(false, 'manage_orbwalker'),
     verbose_logs  = create_checkbox(false, 'verbose_logs'),
     log_all_quests= create_checkbox(false, 'log_all_quests'),
 }
@@ -56,6 +57,12 @@ gui.render = function()
         'active WarPlans quest by enabling ArkhamAsylumPlugin (pit). The pit\n' ..
         'keeps running until a new WarPlans quest matches, at which point the\n' ..
         'normal preemption / disable_when handoff takes over.')
+
+    gui.elements.manage_orbwalker:render('Manage orbwalker',
+        'Before enabling each managed plugin, force orbwalker.set_clear_toggle(true)\n' ..
+        'so the next plugin starts with orbwalker clear ON, regardless of what the\n' ..
+        'previous plugin left it at. Off by default — leaves orbwalker fully under\n' ..
+        'individual plugins / your rotation\'s control.')
 
     gui.elements.verbose_logs:render('Verbose logs', 'Print WarPlans quest diffs to console')
     gui.elements.log_all_quests:render('Log ALL quests', 'Print every newly-seen quest name + id to console (use to capture quest names for new activities)')
