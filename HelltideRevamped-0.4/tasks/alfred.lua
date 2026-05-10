@@ -45,6 +45,7 @@ function task.shouldExecute()
     end
     if settings.salvage then
         if (status.enabled and tracker.needs_salvage) or
+            (status.enabled and (status.need_trigger or status.inventory_full)) or
             task.status == status_enum['WAITING']
         then
             return true
