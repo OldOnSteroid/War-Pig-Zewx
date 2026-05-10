@@ -22,7 +22,14 @@ local tracker = {
     boss_killed = false,
     teleported_from_town = false,
     keep_items = 0,
-    sigil_used = false
+    sigil_used = false,
+    -- Timestamp of the last InfernalHordesPlugin.enable(). Used by horde.lua's
+    -- shouldExecute as a settle gate so the wave-clearing task doesn't fire
+    -- the same tick an external orchestrator (WarPigs) flipped the toggle —
+    -- the world / zone snapshot can lag a tick or two behind a teleport
+    -- channel landing, and we don't want bomber:main_pulse picking targets
+    -- in the wrong world.
+    enable_time = 0
 }
 
 local runtime_timer = {}

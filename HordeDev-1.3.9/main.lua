@@ -47,6 +47,11 @@ InfernalHordesPlugin = {
         -- that finishes at chest_state.FINISHED on the prior run; reset it so
         -- the SM re-enters at INIT.
         open_chests_task:reset()
+        -- Stamp the enable time so the horde task's settle gate (in horde.lua's
+        -- shouldExecute) can wait for world/zone to stabilize before firing
+        -- the wave loop. Read by horde.shouldExecute alongside a world-name
+        -- check ('BSK' substring) — both must hold before the bomber pulses.
+        tracker.enable_time = get_time_since_inject()
         gui.elements.main_toggle:set(true)
         gui.elements.keybind_toggle:set(true)
         settings:update_settings()
@@ -81,13 +86,42 @@ InfernalHordesPlugin = {
         end
         return "IDLE"
     end,
-    -- True once all chests have been looted this run. WarPigs uses this to
+    -- True once HordeDev is committed to leaving BSK. WarPigs uses this to
     -- delay disabling HordeDev when the player leaves BSK temporarily for
     -- a mid-run salvage trip (Alfred TPs to town → player exits BSK →
     -- disable_when would fire too early without this guard).
-    chests_done = function()
-        return tracker.finished_chest_looting == true
-    end,
+    --
+    -- Gate: current task must be "Exit Horde" for CHESTS_DONE_HOLD_S seconds.
+    -- exit_horde.shouldExecute requires player_in_zone(BSK) AND stash visible
+    -- AND finished_chest_looting=true (tasks/exit_horde.lua:49-53), so we're
+    -- looking at the strongest possible "we're done with chests" signal — the
+    -- task that runs only after every chest has been resolved AND the player
+    -- is at the post-boss stash. The hold filters out single-tick blips where
+    -- some other task briefly preempts (e.g. alfred kicking in for salvage)
+    -- before exit_horde re-takes the queue.
+    --
+    -- Why not gate on chest flags directly: open_chests can reach FINISHED
+    -- prematurely (indexing skip in try_next_chest, chest-not-found give-up)
+    -- which flips finished_chest_looting=true after only the first chest. The
+    -- exit_horde task gate is harder to spoof — it requires the boss-room
+    -- stash actor, which only appears once the wave is fully complete.
+    --
+    -- A 300s safety cap exists in WarPigs (max_disable_defer_seconds) so a
+    -- malformed run can't deadlock forever.
+    chests_done = (function()
+        local CHESTS_DONE_HOLD_S = 2.0
+        local first_seen = nil
+        return function()
+            local current = task_manager.get_current_task()
+            local in_exit_horde = current and current.name == "Exit Horde"
+            if not in_exit_horde then
+                first_seen = nil
+                return false
+            end
+            first_seen = first_seen or get_time_since_inject()
+            return (get_time_since_inject() - first_seen) >= CHESTS_DONE_HOLD_S
+        end
+    end)(),
     getSettings = function (setting)
         if settings[setting] then
             return settings[setting]

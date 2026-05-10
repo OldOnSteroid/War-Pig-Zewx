@@ -574,10 +574,51 @@ end
 -- Define the task for the Infernal Horde and its execution conditions
 local has_printed_execution_message = false
 
+-- Settle gate: when an external orchestrator (WarPigs) flips the plugin
+-- enable while a teleport channel is still landing, world/zone reads can lag
+-- a tick or two behind reality. Don't fire the wave loop until:
+--   (a) world name contains "BSK" — confirms we're actually inside the
+--       Infernal Hordes dungeon world, not Limbo / a town world that briefly
+--       reads as the wave zone, and
+--   (b) at least HORDE_ENABLE_SETTLE_S has elapsed since enable() was
+--       stamped on the tracker — gives the engine time to finalize state.
+local HORDE_ENABLE_SETTLE_S = 2.0
+
+local function world_is_bsk()
+    local w = get_current_world()
+    if not w then return false end
+    local ok, name = pcall(function() return w:get_name() end)
+    if not ok or type(name) ~= 'string' then return false end
+    return name:find('BSK', 1, true) ~= nil
+end
+
+local horde_settle_logged = false
 local task = {
     name = "Infernal Horde",
     shouldExecute = function()
-        return utils.player_in_zone("S05_BSK_Prototype02")
+        if not utils.player_in_zone("S05_BSK_Prototype02") then
+            horde_settle_logged = false
+            return false
+        end
+        if not world_is_bsk() then
+            if not horde_settle_logged then
+                console.print("[horde] settle gate: world name not BSK yet — holding")
+                horde_settle_logged = true
+            end
+            return false
+        end
+        local elapsed = get_time_since_inject() - (tracker.enable_time or 0)
+        if elapsed < HORDE_ENABLE_SETTLE_S then
+            if not horde_settle_logged then
+                console.print(string.format(
+                    "[horde] settle gate: %.1fs since enable, waiting for %.1fs",
+                    elapsed, HORDE_ENABLE_SETTLE_S))
+                horde_settle_logged = true
+            end
+            return false
+        end
+        horde_settle_logged = false
+        return true
     end,
     
     Execute = function()

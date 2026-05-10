@@ -503,6 +503,14 @@ orchestrator.quest_plugin_map = {
         -- so a slow chest sequence (talisman + GA + materials with loot
         -- waits) can't be force-disabled by the orchestrator's safety net.
         max_disable_defer_seconds = 300,
+        -- Opt out of same-activity continuation. Back-to-back BSK WarPlans
+        -- leave the player in an empty BSK after the prior wave (no sigil,
+        -- no chests left). The next run requires the full transition:
+        -- exit_horde → Temis → Alfred → warplan.teleport_to_activity() →
+        -- HordeDev re-enable inside a fresh horde. Without this flag,
+        -- SAME_ACTIVITY_SECS (30s) would short-circuit the preamble and
+        -- HordeDev would re-enable in place, doing nothing.
+        same_activity_continuation = false,
         disable_when = (function()
             local exit_defer_start
             return function()
@@ -1207,20 +1215,36 @@ function orchestrator.tick()
     -- unchanged → retry loop) or fight with the plugin's own navigation.
     -- The transition gap (last_disable_time) still applies, giving the game
     -- state a beat to settle before the plugin re-enables.
+    --
+    -- Per-entry opt-out via same_activity_continuation = false: Infernal
+    -- Hordes leaves the player in an empty BSK after the wave; back-to-back
+    -- BSK WarPlans need the FULL exit_horde → Temis → Alfred → warplan
+    -- teleport sequence to actually re-enter a fresh horde. Without the
+    -- opt-out, WarPigs would re-enable HordeDev in place and the player
+    -- would be stuck in an empty BSK with no sigil opened.
     if teleport_pending
         and last_disabled_plugin
         and wants[last_disabled_plugin]
         and (now - last_disabled_at) <= SAME_ACTIVITY_SECS
         and matched_reason[last_disabled_plugin] == last_disabled_reason
     then
-        log(string.format(
-            '%s: same-activity continuation pattern=%s (%.1fs since disable) — cancelling teleport, re-enable in place',
-            last_disabled_plugin, tostring(last_disabled_reason), now - last_disabled_at))
-        teleport_pending             = false
-        teleport_incoming_first_seen = nil
-        teleport_holding_logged      = false
-        last_disabled_plugin         = nil
-        last_disabled_reason         = nil
+        local incoming_entry = wants[last_disabled_plugin]
+        local opt_out = incoming_entry
+            and incoming_entry.same_activity_continuation == false
+        if opt_out then
+            log(string.format(
+                '%s: same-activity continuation OPT-OUT (entry sets same_activity_continuation=false) — proceeding to full transition',
+                last_disabled_plugin))
+        else
+            log(string.format(
+                '%s: same-activity continuation pattern=%s (%.1fs since disable) — cancelling teleport, re-enable in place',
+                last_disabled_plugin, tostring(last_disabled_reason), now - last_disabled_at))
+            teleport_pending             = false
+            teleport_incoming_first_seen = nil
+            teleport_holding_logged      = false
+            last_disabled_plugin         = nil
+            last_disabled_reason         = nil
+        end
     end
 
     -- ── TELEPORT TRANSITION (optional) ──────────────────────────────────────
