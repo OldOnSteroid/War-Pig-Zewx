@@ -69,12 +69,22 @@ local function alfred_idle()
     return true
 end
 
--- When Alfred is paused but has work to do (need_trigger / inventory_full) and
--- the player is in town, resume and trigger it so it can run before the next
--- teleport. Called each tick while teleport_pending is true so it fires as soon
--- as we land in town after a pit/undercity/horde exit. Only acts while paused —
--- once resumed, Alfred's own loop takes over and alfred_idle() gates on
--- trigger_tasks clearing, so we won't double-fire.
+-- When Alfred has work to do (need_trigger / inventory_full) but isn't actively
+-- running (trigger_tasks=false) and the player is in town, resume and trigger
+-- it so the work runs before the next teleport. Called each tick while
+-- teleport_pending is true so it fires as soon as we land in town after a
+-- pit/undercity/horde exit.
+--
+-- We do NOT gate on s.paused: SteroidAlfredButler's get_status() omits the
+-- paused field entirely (the upstream AlfredTheButler-main exposes it, the
+-- steroid fork doesn't), so on that fork s.paused is always nil and a
+-- paused-with-work Alfred would deadlock the gate forever. Gating on
+-- "not s.trigger_tasks" instead correctly distinguishes "Alfred has work
+-- queued but isn't processing it" from "Alfred is mid-cycle" without depending
+-- on a field the active fork may not expose. Cooldown prevents per-tick spam
+-- since trigger_tasks→true takes 1+ ticks to flip after we kick.
+local ALFRED_KICK_COOLDOWN = 5.0
+local last_alfred_kick_at  = -math.huge
 local function alfred_kick_if_needed()
     -- Inline in-town check (in_town_disable_when is defined later in this file).
     local _lp = get_local_player()
@@ -90,13 +100,19 @@ local function alfred_kick_if_needed()
     local ok, s = pcall(alfred.get_status)
     if not ok or type(s) ~= 'table' then return end
     if not s.enabled then return end
-    if not s.paused then return end
+    -- Already actively processing — don't re-fire trigger_tasks (would
+    -- overwrite external_caller and disrupt the in-flight cycle, see
+    -- feedback_alfred_yield_rule).
+    if s.trigger_tasks then return end
     if not (s.need_trigger or s.inventory_full) then return end
+    local now = get_time_since_inject()
+    if (now - last_alfred_kick_at) < ALFRED_KICK_COOLDOWN then return end
+    last_alfred_kick_at = now
     if type(alfred.resume) == 'function' then pcall(alfred.resume) end
     if type(alfred.trigger_tasks) == 'function' then
         pcall(alfred.trigger_tasks, 'WarPigs')
     end
-    log('Alfred was paused with work pending — resumed and triggered (in town, pre-transition)')
+    log('Alfred had work pending but was not processing — resumed and triggered (in town, pre-transition)')
 end
 
 -- Via-Temis-Alfred preamble: before EVERY warplan teleport (cold start + each
@@ -1710,6 +1726,7 @@ function orchestrator.release_all()
     teleport_transition.snap_world        = nil
     teleport_transition.snap_zone         = nil
     teleport_transition.last_temis_tp     = -math.huge
+    last_alfred_kick_at                   = -math.huge
     teleport_transition.alfred_fired_at   = nil
     teleport_transition.alfred_was_busy   = false
     teleport_transition.alfred_picked_up  = false
