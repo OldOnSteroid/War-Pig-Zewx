@@ -48,9 +48,29 @@ function settings:update_settings()
     settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
 end
 
+-- Above this cinder count, force orbwalker clear OFF so the bot stops lingering
+-- to fight for cinders we don't need and can prioritize finding/opening chests.
+local CINDER_CLEAR_OFF_THRESHOLD = 150
+
+local function cinder_gate_active()
+    return get_helltide_coin_cinders() > CINDER_CLEAR_OFF_THRESHOLD
+end
+
 settings.orb_set_clear = function (v)
-    if settings.manage_orbwalker then
-        orbwalker.set_clear_toggle(v)
+    if not settings.manage_orbwalker then return end
+    if v and cinder_gate_active() then
+        v = false
+    end
+    orbwalker.set_clear_toggle(v)
+end
+
+-- Tick driver: call from the main task pulse so the OFF state is asserted
+-- even in non-kill states (EXPLORE_HELLTIDE, MOVING_TO_*, etc.) where nothing
+-- would otherwise call orb_set_clear and a previously-ON toggle would persist.
+settings.apply_cinder_orb_gate = function ()
+    if not settings.manage_orbwalker then return end
+    if cinder_gate_active() then
+        orbwalker.set_clear_toggle(false)
     end
 end
 

@@ -152,6 +152,20 @@ local function in_temis()
     return ok2 and zname == TEMIS_ZONE
 end
 
+-- Predicate: are we currently inside a BSK world (S05_BSK_*)? Used as the
+-- enable_gate for InfernalHordes so the plugin is never started outside the
+-- horde world while the teleport transition is enabled — without this, a
+-- short-circuited warplan teleport (task_only_incoming, already_arrived,
+-- warplan unavailable, or a stray world/zone change that "confirmed" the
+-- TELEPORTING state) would let HordeDev enable in town and burn cycles in
+-- "Walking to Horde".
+local function in_bsk_world()
+    local ok, w = pcall(function() return get_current_world() end)
+    if not ok or w == nil then return false end
+    local ok2, wname = pcall(function() return w:get_name() end)
+    return ok2 and type(wname) == 'string' and wname:find('BSK', 1, true) ~= nil
+end
+
 -- Resume Alfred if paused, then fire trigger_tasks. Returns true if a trigger
 -- was actually issued (Alfred loaded AND enabled). False means caller should
 -- skip the TEMIS_ALFRED dwell and go straight to the warplan teleport.
@@ -499,6 +513,18 @@ orchestrator.quest_plugin_map = {
     -- BSK world (S05_BSK_Prototype02) or 60s elapse as a safety cap.
     WarPlans_QST_InfernalHordes = {
         plugin = 'InfernalHordesPlugin',
+        -- HARD GATE: when use_teleport_transition is on, never enable HordeDev
+        -- unless we are currently inside a BSK world. The teleport state
+        -- machine *should* land us there, but its confirmation is just
+        -- "world/zone changed" — a stray zone change in town will satisfy it
+        -- and the plugin would otherwise enable outside BSK and walk forever.
+        -- With teleport off, the user is driving navigation themselves, so we
+        -- don't impose the gate.
+        enable_gate = function()
+            if not settings.use_teleport_transition then return true end
+            if in_bsk_world() then return true end
+            return false, 'not in BSK world (teleport transition is on — refusing to start HordeDev outside BSK)'
+        end,
         -- Quest vanishes when the wave bosses die, but HordeDev still has to
         -- run its full post-boss cycle: open the talisman chest (if enabled),
         -- the greater-affix chest (if enabled), the materials/selected chest,
@@ -1587,6 +1613,21 @@ function orchestrator.tick()
             local w         = get_current_world()
             local cur_world = w and w:get_name()
             local cur_zone  = w and w:get_current_zone_name()
+            -- Loading-screen guard: between activities the game briefly reports
+            -- world=Limbo / zone=[sno none]. That's the in-flight transition
+            -- state, NOT the destination — confirming on it released the gate
+            -- before BSK actually loaded, then enable_gate denied and re-armed
+            -- the whole detour in a loop. Treat Limbo as "still teleporting":
+            -- don't confirm, don't retry the warplan call (the channel landed,
+            -- we just haven't finished loading), just re-poll next interval.
+            local in_limbo = cur_world == 'Limbo' or cur_zone == '[sno none]'
+            if in_limbo then
+                teleport_transition.started_at = now
+                log(string.format(
+                    'teleport in-flight — world=%s zone=%s, holding for load to finish',
+                    tostring(cur_world), tostring(cur_zone)))
+                return
+            end
             local changed   = cur_world ~= teleport_transition.snap_world
                            or cur_zone  ~= teleport_transition.snap_zone
             -- Secondary confirmation: quest actor visible means we arrived even
@@ -1674,10 +1715,39 @@ function orchestrator.tick()
             and last_enabled_reason[plugin_name]
             and last_enabled_reason[plugin_name] ~= reason
         if newly_wanted or reason_changed then
+            -- Per-entry hard gate (e.g. InfernalHordes refuses to enable
+            -- outside BSK while teleport transition is on). Evaluated AFTER
+            -- the transition gate so the orchestrator's normal sequencing
+            -- runs first; this is a final safety net for the case where the
+            -- teleport state machine "confirmed" without actually landing us
+            -- at the destination.
+            local entry_gate_reason
+            if type(entry.enable_gate) == 'function' then
+                local ok, allowed, why = pcall(entry.enable_gate)
+                if ok and not allowed then
+                    entry_gate_reason = why or 'enable_gate denied'
+                end
+            end
             if gate_reason then
                 if enable_blocked[plugin_name] ~= gate_reason then
                     log('deferring enable of ' .. plugin_name .. ' — ' .. gate_reason)
                     enable_blocked[plugin_name] = gate_reason
+                end
+            elseif entry_gate_reason then
+                if enable_blocked[plugin_name] ~= entry_gate_reason then
+                    log('BLOCKING enable of ' .. plugin_name .. ' — ' .. entry_gate_reason)
+                    enable_blocked[plugin_name] = entry_gate_reason
+                end
+                -- Re-arm the teleport sequence if it has gone idle without
+                -- delivering us to the destination — otherwise the gate would
+                -- deadlock. Only re-arm when the state machine isn't already
+                -- working: teleport_pending false AND state IDLE.
+                if settings.use_teleport_transition
+                    and not teleport_pending
+                    and teleport_transition.state == 'IDLE'
+                then
+                    log('re-arming teleport_pending — enable_gate denied with state IDLE')
+                    teleport_pending = true
                 end
             else
                 if reason_changed then

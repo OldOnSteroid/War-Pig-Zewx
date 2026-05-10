@@ -24,10 +24,14 @@ utils.is_mounted = function ()
     return local_player:get_attribute(attributes.CURRENT_MOUNT) < 0
 end
 utils.player_in_zone = function (zname)
-    return get_current_world():get_current_zone_name() == zname
+    local world = get_current_world()
+    if not world then return false end
+    return world:get_current_zone_name() == zname
 end
 utils.player_loading = function ()
-    return utils.player_in_zone('[sno none]')
+    local world = get_current_world()
+    if not world then return true end
+    return world:get_current_zone_name() == '[sno none]'
 end
  utils.player_in_town = function()
     if get_local_player():get_attribute(attributes.PLAYER_IN_TOWN_LEVEL_AREA) == 1 then

@@ -1437,6 +1437,8 @@ local helltide_task = {
             end
         end
 
+        settings.apply_cinder_orb_gate()
+
         local now = get_time_since_inject()
 
         -- Zone-override walk-to-entry guard.  When WarPigs (or another external

@@ -6,13 +6,15 @@ local settings = require 'core.settings'
 -- Heart of Stone (Choron's Burden) — a Warplans-family carryable that can spawn
 -- anywhere on a pit floor.  Picking it up is a single interact_object click;
 -- the actor goes non-interactable / despawns once carried.  We detect from
--- anywhere in the pit (no distance gate), let Batmobile route to it, dwell
--- briefly on arrival so the click registers cleanly, then click once.
-local HEART_ACTOR_NAME = 'Warplans_Pit_ChoronsBurden_Carryable'
-local INTERACT_RANGE   = 2     -- distance considered "at the heart"
-local ARRIVAL_DELAY    = 1.5   -- dwell after arrival before firing the click
-local INTERACT_TIMEOUT = 4.0   -- if click doesn't take after this many seconds, blacklist
-local WALK_TIMEOUT     = 30.0  -- give up reaching this heart after this long without arriving
+-- anywhere in the pit (no distance gate), route to it via long_path so we can
+-- handle partial paths / traversal-gated approaches, dwell briefly on arrival
+-- so the click registers cleanly, then click once.
+local HEART_ACTOR_NAME    = 'Warplans_Pit_ChoronsBurden_Carryable'
+local INTERACT_RANGE      = 2     -- distance considered "at the heart"
+local ARRIVAL_DELAY       = 1.5   -- dwell after arrival before firing the click
+local INTERACT_TIMEOUT    = 4.0   -- if click doesn't take after this many seconds, blacklist
+local WALK_TIMEOUT        = 30.0  -- give up reaching this heart after this long without arriving
+local PATH_RETRY_INTERVAL = 2     -- repath cadence — matches explore_pit orb/anchor pattern for partial paths
 
 local status_enum = {
     IDLE        = 'idle',
@@ -26,11 +28,13 @@ local task = {
     status = status_enum['IDLE'],
 }
 
-local active_key   = nil
-local arrived_time = nil
-local walk_started = nil
-local clicked_time = nil
-local skipped      = {}  -- key: "x,y" of heart position
+local active_key       = nil
+local arrived_time     = nil
+local walk_started     = nil
+local clicked_time     = nil
+local long_path_target = nil  -- vec3 we last issued navigate_long_path for
+local path_issue_time  = -math.huge
+local skipped          = {}  -- key: "x,y" of heart position
 
 local function heart_key(actor)
     local pos = actor:get_position()
@@ -38,10 +42,12 @@ local function heart_key(actor)
 end
 
 local function reset_state()
-    active_key   = nil
-    arrived_time = nil
-    walk_started = nil
-    clicked_time = nil
+    active_key       = nil
+    arrived_time     = nil
+    walk_started     = nil
+    clicked_time     = nil
+    long_path_target = nil
+    path_issue_time  = -math.huge
 end
 
 -- Uses get_all_actors because the Warplans actor family isn't surfaced via
@@ -66,7 +72,10 @@ task.shouldExecute = function ()
     if not utils.player_in_pit() then return false end
     local heart = get_heart()
     if not heart then
-        if active_key then reset_state() end
+        if active_key then
+            BatmobilePlugin.stop_long_path(plugin_label)
+            reset_state()
+        end
         return false
     end
     return true
@@ -101,14 +110,27 @@ task.Execute = function ()
 
     -- Walk phase
     if dist > INTERACT_RANGE then
-        local disable_spell = (dist <= 4)
-        local accepted = BatmobilePlugin.set_target(plugin_label, heart, disable_spell)
-        if accepted == false then
-            console.print("[pickup_heart_of_stone] navigator rejected target for " .. tostring(key) .. " — blacklisting")
-            skipped[key] = true
-            reset_state()
-            BatmobilePlugin.clear_target(plugin_label)
-            return
+        local heart_pos = heart:get_position()
+        -- Repath cadence mirrors explore_pit's orb/anchor pattern: re-issue
+        -- navigate_long_path when the target moves, when long_path stops
+        -- navigating with us still out of range (partial path / unreachable
+        -- approach), or when we have no active target.
+        local need_repath = long_path_target == nil
+            or long_path_target:dist_to(heart_pos) > 3
+            or (not BatmobilePlugin.is_long_path_navigating()
+                and (now - path_issue_time) > PATH_RETRY_INTERVAL)
+        if need_repath then
+            local started = BatmobilePlugin.navigate_long_path(plugin_label, heart_pos)
+            if started then
+                long_path_target = vec3:new(heart_pos:x(), heart_pos:y(), heart_pos:z())
+                path_issue_time  = now
+            else
+                console.print("[pickup_heart_of_stone] navigate_long_path rejected for " .. tostring(key) .. " — blacklisting")
+                skipped[key] = true
+                BatmobilePlugin.stop_long_path(plugin_label)
+                reset_state()
+                return
+            end
         end
         BatmobilePlugin.move(plugin_label)
         task.status = status_enum['WALKING']
@@ -117,13 +139,14 @@ task.Execute = function ()
             console.print("[pickup_heart_of_stone] walk timeout (" .. WALK_TIMEOUT ..
                 "s) for heart " .. tostring(key) .. " — blacklisting")
             skipped[key] = true
+            BatmobilePlugin.stop_long_path(plugin_label)
             reset_state()
         end
         return
     end
 
     -- We're at the heart — hold position
-    BatmobilePlugin.clear_target(plugin_label)
+    BatmobilePlugin.stop_long_path(plugin_label)
 
     if arrived_time == nil then
         arrived_time = now

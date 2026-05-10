@@ -376,6 +376,42 @@ function helltide_explorer.mark_active_unreachable()
     stuck_dist  = nil
 end
 
+-- Mark the grid node nearest a just-opened chest as visited, so the explorer
+-- doesn't immediately route back to a tile we've clearly already covered.
+-- Only marks if the nearest node is within GRID_SPACING (one cell) of the chest
+-- — chests outside the grid bounds are simply ignored.
+function helltide_explorer.mark_chest_opened(pos)
+    if not pos or not nodes then return end
+    local now = get_time_since_inject()
+    local best_idx, best_dist = nil, math.huge
+    for i, n in ipairs(nodes) do
+        local d = pos:dist_to(n.pos)
+        if d < best_dist then
+            best_dist = d
+            best_idx  = i
+        end
+    end
+    if not best_idx or best_dist > GRID_SPACING then return end
+    local n = nodes[best_idx]
+    if n.visited_at == 0 then
+        n.visited_at  = now
+        n.visit_count = n.visit_count + 1
+        n.fail_count  = 0
+    else
+        n.visited_at  = now
+    end
+    -- If we were actively heading to this node, clear so a fresh pick happens.
+    if active_idx == best_idx then
+        active_idx          = nil
+        stuck_time          = nil
+        stuck_dist          = nil
+        cached_intermediate = nil
+    end
+    console.print(string.format(
+        "[EXPLORER] Node %d at (%.0f,%.0f) marked visited (chest opened nearby, dist=%.1fm)",
+        best_idx, n.pos:x(), n.pos:y(), best_dist))
+end
+
 -- Full wipe — call from helltide_task:reset() on session end.
 function helltide_explorer.reset()
     nodes               = nil

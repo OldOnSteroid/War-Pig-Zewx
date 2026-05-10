@@ -18,7 +18,8 @@ local navigator = {
     movement_dist = math.sqrt(4*4*2), -- diagonal dist
     spell_dist = 12,
     spell_time = -1,
-    spell_timeout = 0.5,
+    spell_timeout = 0.15,
+    warlock_alt = false,  -- toggles between WS and DS each cast attempt
     blacklisted_spell_node = {},
     unstuck_nodes = {},
     unstuck_count = 0,
@@ -322,9 +323,17 @@ local function try_traversal_route(local_player, player_pos)
     return true, closest_trav
 end
 local get_movement_spell_id = function(local_player)
-    if not settings.use_movement then return end
-    if navigator.disable_spell == true then return end
-    if navigator.spell_time + navigator.spell_timeout > get_time_since_inject() then return end
+    if not settings.use_movement then
+        console.print('[move_spell] skip: use_movement=false')
+        return
+    end
+    if navigator.disable_spell == true then
+        console.print('[move_spell] skip: navigator.disable_spell=true')
+        return
+    end
+    if navigator.spell_time + navigator.spell_timeout > get_time_since_inject() then
+        return
+    end
     navigator.spell_time = get_time_since_inject()
     local class = utils.get_character_class(local_player)
     if class == 'sorcerer' then
@@ -366,11 +375,24 @@ local get_movement_spell_id = function(local_player)
             return 2297125, true
         end
     elseif class == 'warlock' then
-        if settings.use_wraith_step and utility.can_cast_spell(2218211) then
-            return 2218211, false
-        end
-        if settings.use_demonic_slash and utility.can_cast_spell(2221282) then
-            return 2221282, settings.demonic_slash_los == true
+        local ws_en = settings.use_wraith_step == true
+        local ds_en = settings.use_demonic_slash == true
+        if ws_en and ds_en then
+            -- Both enabled: alternate so each fires roughly half the time, no ready check.
+            navigator.warlock_alt = not navigator.warlock_alt
+            if navigator.warlock_alt then
+                console.print('[move_spell] warlock pick=ws (alt, no ready check)')
+                return 2218211, false, 15
+            else
+                console.print('[move_spell] warlock pick=ds (alt, no ready check)')
+                return 2221282, settings.demonic_slash_los == true, 15
+            end
+        elseif ws_en then
+            console.print('[move_spell] warlock pick=ws (no ready check)')
+            return 2218211, false, 15
+        elseif ds_en then
+            console.print('[move_spell] warlock pick=ds (no ready check)')
+            return 2221282, settings.demonic_slash_los == true, 15
         end
     end
     -- class == 'druid' or class == 'necromancer'
@@ -1161,34 +1183,92 @@ navigator.move = function ()
     -- movement spells
     tracker.bench_start("nav_move_spell")
     if not utils.player_in_town() and #navigator.path > 0 then
-        local movement_spell_id, need_raycast = get_movement_spell_id(local_player)
+        local movement_spell_id, need_raycast, spell_range = get_movement_spell_id(local_player)
         if movement_spell_id ~= nil then
+            local range = spell_range or navigator.spell_dist
+            local min_req = settings.min_spell_dist or navigator.movement_step
             local spell_node = nil
             local node_dist = -1
-            local new_path = {}
-            local selected = false
-            for _, node in ipairs(navigator.path) do
+            local picked_idx = 0
+            local interpolated = false
+            local skipped_blacklist = 0
+            local skipped_close = 0
+            local max_seen = 0
+            local prev = cur_node
+            for i, node in ipairs(navigator.path) do
                 local dist = utils.distance(node, cur_node)
+                if dist > max_seen then max_seen = dist end
                 local node_str = utils.vec_to_string(node)
-                if selected or dist > navigator.spell_dist or node_dist > dist then
-                    new_path[#new_path+1] = node
-                    selected = true
-                elseif navigator.blacklisted_spell_node[node_str] == nil and
-                    -- move to nodes that is >= max(movement step, user min)
-                    utils.distance(node, cur_node) >= math.max(navigator.movement_step, settings.min_spell_dist or 0)
-                then
-                    spell_node = node
-                    node_dist = dist
+                if dist <= range then
+                    if navigator.blacklisted_spell_node[node_str] ~= nil then
+                        skipped_blacklist = skipped_blacklist + 1
+                    elseif dist < min_req then
+                        skipped_close = skipped_close + 1
+                    elseif dist > node_dist then
+                        spell_node = node
+                        node_dist = dist
+                        picked_idx = i
+                        interpolated = false
+                    end
+                    prev = node
+                else
+                    -- Segment from prev → node crosses the range boundary. Interpolate a
+                    -- synthetic point at exactly `range` units from the player so we get
+                    -- the spell's full distance even after path smoothing collapses
+                    -- intermediate waypoints.
+                    local prev_d = utils.distance(prev, cur_node)
+                    if prev_d < range and range > node_dist and range >= min_req then
+                        local Ax, Ay = prev:x(), prev:y()
+                        local Bx, By = node:x(), node:y()
+                        local Cx, Cy = cur_node:x(), cur_node:y()
+                        local dx, dy = Bx - Ax, By - Ay
+                        local fx, fy = Ax - Cx, Ay - Cy
+                        local a = dx*dx + dy*dy
+                        local b = 2 * (fx*dx + fy*dy)
+                        local c = fx*fx + fy*fy - range*range
+                        local disc = b*b - 4*a*c
+                        if a > 0 and disc >= 0 then
+                            local sq = math.sqrt(disc)
+                            local t2 = (-b + sq) / (2*a)
+                            local t1 = (-b - sq) / (2*a)
+                            local t = nil
+                            if t2 >= 0 and t2 <= 1 then t = t2
+                            elseif t1 >= 0 and t1 <= 1 then t = t1 end
+                            if t ~= nil then
+                                local Pz = prev:z() + t * (node:z() - prev:z())
+                                local interp = vec3:new(Ax + t * dx, Ay + t * dy, Pz)
+                                spell_node = interp
+                                node_dist = range
+                                picked_idx = i - 1  -- new_path starts with this segment's far end
+                                interpolated = true
+                            end
+                        end
+                    end
+                    break
                 end
             end
+            local new_path = {}
+            for j = picked_idx + 1, #navigator.path do
+                new_path[#new_path+1] = navigator.path[j]
+            end
+            console.print(string.format(
+                '[move_spell] spell=%d path=%d max_dist=%.1f min_req=%.1f range=%.1f bl_skipped=%d close_skipped=%d picked=%s%s',
+                movement_spell_id, #navigator.path, max_seen, min_req, range,
+                skipped_blacklist, skipped_close,
+                spell_node and string.format('%.1f', node_dist) or 'nil',
+                interpolated and ' [interp]' or ''))
             if spell_node ~= nil then
                 local raycast_success = true
                 if need_raycast then
                     local dist = utils.distance(cur_node, spell_node)
                     raycast_success = utility.is_ray_cast_walkeable(cur_node, spell_node, 0.5, dist)
+                    if not raycast_success then
+                        console.print('[move_spell] raycast blocked to ' .. utils.vec_to_string(spell_node))
+                    end
                 end
                 if raycast_success then
                     local success = cast_spell.position(movement_spell_id, spell_node, 0)
+                    console.print('[move_spell] cast_spell.position -> ' .. tostring(success))
                     if success then
                         utils.log(2, 'movement spell to ' .. utils.vec_to_string(spell_node))
                         tracker.bench_count("move_spell_cast")
