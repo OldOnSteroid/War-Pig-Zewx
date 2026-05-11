@@ -2,6 +2,7 @@ local plugin_label = "helltide_revamped" -- change to your plugin name
 
 local settings = require 'core.settings'
 local tracker = require "core.tracker"
+local utils = require "core.utils"
 -- need use_alfred to enable
 -- settings.salvage = true
 
@@ -36,6 +37,16 @@ local function get_alfred_status()
     return {enabled = false}
 end
 
+-- Tracks when our last Alfred cycle finished. Used to short-circuit the
+-- Steroid restock-stickiness loop: tracker.need_trigger stays true forever
+-- when restock_count > 0 can't be cleared (configured restock items with
+-- nothing in stash to pull). Without this, shouldExecute fires every tick
+-- on need_trigger, retriggering Alfred every ~10s for no-progress cycles
+-- (observed in logzewx 31/42/43/57/58 — five rapid-fire stash cycles with
+-- inventory empty). Mirrors WarPigs orchestrator's alfred_idle escape.
+local last_completion_at = nil
+local STUCK_NEED_TRIGGER_GRACE = 30.0
+
 local function reset()
     local a = get_alfred()
     if a and not is_steroid() then
@@ -52,6 +63,7 @@ local function reset()
     tracker.has_salvaged = true
     tracker.needs_salvage = false
     task.status = status_enum['IDLE']
+    last_completion_at = get_time_since_inject()
 end
 
 local function trigger_alfred()
@@ -84,9 +96,37 @@ function task.shouldExecute()
     if not settings.salvage then return false end
 
     -- Steroid's documented integration (README §create_task) reacts to
-    -- need_trigger directly. Works on AlfredTheButler-main too — same
-    -- semantics, also exposed in get_status().
-    if status.need_trigger then return true end
+    -- need_trigger directly. We apply two gates on top:
+    --
+    -- (1) Activity-scope gate: only react when actually farming
+    --     (utils.is_in_helltide() — buff present). Without this, when
+    --     helltide ends mid-hour (minute >=55) or the buff drops between
+    --     zones, HR alfred.lua would keep firing on persistent need_trigger
+    --     and bounce the player town↔portal for the 5min off-window.
+    --     tracker.needs_salvage below still handles "HR transitioned to
+    --     BACK_TO_TOWN explicitly" (set in helltide.lua:back_to_town), so
+    --     the legitimate end-of-helltide salvage flow is unaffected.
+    --     Steroid's own Status task self-triggers on tracker.need_trigger
+    --     (status.lua:121) when no external script is driving — so
+    --     genuine inventory_full / need_repair work isn't lost, it just
+    --     stops going through our channel during the off-window.
+    -- (2) Restock-stickiness escape: skip if our last cycle finished
+    --     within STUCK_NEED_TRIGGER_GRACE and only restock/stash-extras
+    --     flags are sticky (no inventory_full, no need_repair) — the
+    --     prior cycle couldn't clear it, re-running won't either.
+    if status.need_trigger and utils.is_in_helltide() then
+        local now = get_time_since_inject()
+        local cycle_just_completed = last_completion_at
+            and (now - last_completion_at) < STUCK_NEED_TRIGGER_GRACE
+        if cycle_just_completed
+            and not status.inventory_full
+            and not status.need_repair
+        then
+            -- stuck need_trigger — skip
+        else
+            return true
+        end
+    end
 
     -- Legacy back_to_town signal set in helltide.lua:back_to_town. Kept
     -- so the original "transitioning to BACK_TO_TOWN → run Alfred" path

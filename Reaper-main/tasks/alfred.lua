@@ -37,6 +37,11 @@ local function get_alfred_status()
     return {enabled = false}
 end
 
+-- Tracks last cycle completion for restock-stickiness escape. See
+-- HelltideRevamped/tasks/alfred.lua for the full rationale.
+local last_completion_at = nil
+local STUCK_NEED_TRIGGER_GRACE = 30.0
+
 local function reset()
     local a = get_alfred()
     if a and not is_steroid() then
@@ -44,6 +49,7 @@ local function reset()
     end
     -- Steroid: skip pause to avoid Status-task monopolising the loop.
     task.status = status_enum.IDLE
+    last_completion_at = get_time_since_inject()
 end
 
 local function trigger_alfred()
@@ -66,8 +72,22 @@ function task.shouldExecute()
     -- Hold while we have our own cycle in flight.
     if task.status == status_enum.WAITING then return true end
 
-    -- need_trigger is the unified signal across both forks.
-    if status.need_trigger then return true end
+    -- need_trigger is the unified signal across both forks. Restock-
+    -- stickiness escape: skip if last cycle just completed and only
+    -- restock/stash-extras flags are sticky (see HelltideRevamped).
+    if status.need_trigger then
+        local now = get_time_since_inject()
+        local cycle_just_completed = last_completion_at
+            and (now - last_completion_at) < STUCK_NEED_TRIGGER_GRACE
+        if cycle_just_completed
+            and not status.inventory_full
+            and not status.need_repair
+        then
+            -- stuck need_trigger — skip
+        else
+            return true
+        end
+    end
 
     -- AlfredTheButler-main-only legacy fallback path: when the upstream
     -- get_status() shape was thinner the original Reaper code reacted

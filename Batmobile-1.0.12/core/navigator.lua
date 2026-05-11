@@ -3,6 +3,7 @@ local path_finder = require 'core.pathfinder'
 local utils = require 'core.utils'
 local settings = require 'core.settings'
 local tracker = require 'core.tracker'
+local mengine = require 'core.movement_engine'
 
 local navigator = {
     last_pos = nil,
@@ -335,6 +336,30 @@ local get_movement_spell_id = function(local_player)
         return
     end
     navigator.spell_time = get_time_since_inject()
+
+    -- Movement revamp: when on, replace the legacy class chain with the
+    -- user's rule list. Returns (skill_id, needs_raycast, range, pos, idx)
+    -- with pos/idx as overrides so move() skips its own node picker.
+    if settings.movement_revamp then
+        if not local_player then return end
+        local player_pos = local_player:get_position()
+        if not player_pos then return end
+        local ctx = {
+            local_player    = local_player,
+            path            = navigator.path,
+            player_pos      = player_pos,
+            default_range   = navigator.spell_dist,
+            min_spell_dist  = settings.min_spell_dist or navigator.movement_step,
+            blacklist       = navigator.blacklisted_spell_node,
+        }
+        local sid, need_rc, rng, pos, idx = mengine.pick(settings.movement_rules, ctx)
+        if sid then
+            console.print(string.format('[move_spell][revamp] cast id=%d pos=(%s)', sid, utils.vec_to_string(pos) or '?'))
+            return sid, need_rc, rng, pos, idx
+        end
+        return
+    end
+
     local class = utils.get_character_class(local_player)
     if class == 'sorcerer' then
         if settings.use_teleport and utility.can_cast_spell(288106) then
@@ -1183,7 +1208,7 @@ navigator.move = function ()
     -- movement spells
     tracker.bench_start("nav_move_spell")
     if not utils.player_in_town() and #navigator.path > 0 then
-        local movement_spell_id, need_raycast, spell_range = get_movement_spell_id(local_player)
+        local movement_spell_id, need_raycast, spell_range, override_pos, override_idx = get_movement_spell_id(local_player)
         if movement_spell_id ~= nil then
             local range = spell_range or navigator.spell_dist
             local min_req = settings.min_spell_dist or navigator.movement_step
@@ -1195,6 +1220,12 @@ navigator.move = function ()
             local skipped_close = 0
             local max_seen = 0
             local prev = cur_node
+            -- Revamp engine pre-picks position. Skip the legacy node loop in that case.
+            if override_pos ~= nil then
+                spell_node = override_pos
+                picked_idx = override_idx or 0
+                node_dist  = utils.distance(cur_node, override_pos)
+            else
             for i, node in ipairs(navigator.path) do
                 local dist = utils.distance(node, cur_node)
                 if dist > max_seen then max_seen = dist end
@@ -1247,6 +1278,7 @@ navigator.move = function ()
                     break
                 end
             end
+            end -- /override_pos else branch
             local new_path = {}
             for j = picked_idx + 1, #navigator.path do
                 new_path[#new_path+1] = navigator.path[j]

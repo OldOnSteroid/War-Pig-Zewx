@@ -46,6 +46,11 @@ local teleport_with_debounce = function ()
     teleport_to_waypoint(settings.town_waypoint)
 end
 
+-- Tracks last cycle completion for restock-stickiness escape. See
+-- HelltideRevamped/tasks/alfred.lua for the full rationale.
+local last_completion_at = nil
+local STUCK_NEED_TRIGGER_GRACE = 30.0
+
 local reset = function ()
     local a = get_alfred()
     if a and not is_steroid() then
@@ -59,6 +64,7 @@ local reset = function ()
     else
         task.status = status_enum['IDLE']
     end
+    last_completion_at = get_time_since_inject()
 end
 
 local function trigger_alfred()
@@ -89,18 +95,24 @@ task.shouldExecute = function ()
     if alfred_busy then return true end
 
     -- need_trigger is the documented Steroid signal AND the unified
-    -- AlfredTheButler-main signal. But WonderCity has zone-specific
-    -- gating: when inside the Undercity dungeon, only break out on
-    -- inventory_full (Aubrie can take items mid-run, so we tolerate
-    -- repair/restock work waiting until the run ends). Don't fire at
-    -- all in the [sno none] transition zone — wait for a real zone.
+    -- AlfredTheButler-main signal. WonderCity has zone-specific gating
+    -- AND a restock-stickiness escape (last cycle just finished + only
+    -- sticky flags set → skip; see HelltideRevamped for the same shape).
     if status.need_trigger then
-        local in_uc = utils.player_in_undercity()
-        local in_sno_none = utils.player_in_zone('[sno none]')
-        if in_uc then
-            if status.inventory_full then return true end
-        elseif not in_sno_none then
-            return true
+        local now = get_time_since_inject()
+        local cycle_just_completed = last_completion_at
+            and (now - last_completion_at) < STUCK_NEED_TRIGGER_GRACE
+        local sticky_only = cycle_just_completed
+            and not status.inventory_full
+            and not status.need_repair
+        if not sticky_only then
+            local in_uc = utils.player_in_undercity()
+            local in_sno_none = utils.player_in_zone('[sno none]')
+            if in_uc then
+                if status.inventory_full then return true end
+            elseif not in_sno_none then
+                return true
+            end
         end
     end
 

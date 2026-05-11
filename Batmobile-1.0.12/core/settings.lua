@@ -1,4 +1,5 @@
-local gui = require 'gui'
+local gui  = require 'gui'
+local mrul = require 'core.movement_rules'
 
 local settings = {
     plugin_label = gui.plugin_label,
@@ -31,7 +32,71 @@ local settings = {
     path_smooth_step = 1.0,
     wall_path = false,
     wall_path_dist = 4.0,
+    -- Movement revamp
+    movement_revamp = false,
+    movement_rules  = {},   -- rebuilt each tick from widget state
 }
+
+-- Read a single rule slot's widget state into a plain rule table.
+local function _read_rule(slot)
+    local rw = gui.elements.mvr_rule_widgets and gui.elements.mvr_rule_widgets[slot]
+    if not rw then return nil end
+    local rule = {
+        enabled         = rw.enabled:get(),
+        skill_id        = 0,
+        cast_position   = 'next_node',
+        density_radius  = rw.density_radius:get(),
+        throttle_ms     = rw.throttle_ms:get(),
+        conditions      = {},
+    }
+    -- combo_box:get() is 0-indexed. items[1] = "(none)" therefore idx 0 = none,
+    -- idx N>=1 = the N-th catalog entry.
+    local skill_idx = rw.skill:get() or 0
+    if skill_idx > 0 then
+        local cat = mrul.skill_catalog[skill_idx]
+        if cat then rule.skill_id = cat.id end
+    end
+    local cp_idx = rw.cast_position:get() or 0
+    local cp_entry = mrul.cast_positions[cp_idx + 1]
+    if cp_entry then rule.cast_position = cp_entry.key end
+    -- Conditions
+    local active_count = rw.active_cond_count:get() or 0
+    if active_count > mrul.MAX_CONDITIONS_PER_RULE then
+        active_count = mrul.MAX_CONDITIONS_PER_RULE
+    end
+    for c = 1, active_count do
+        local cw = rw.cond_widgets[c]
+        if cw then
+            -- combo_box values are all 0-indexed. Items arrays are 1-indexed
+            -- in Lua, so we add 1 when looking them up.
+            local type_idx = (cw.type:get() or 0) + 1
+            local type_key = (mrul.condition_types[type_idx] or { key = 'none' }).key
+            local op_idx   = (cw.op:get() or 0) + 1
+            local cond = {
+                combinator = (cw.combinator:get() == 1) and 'OR' or 'AND',
+                type       = type_key,
+                op         = mrul.ops[op_idx] or '<',
+                value      = cw.value:get() or 0,
+                buff_hash  = cw.buff_hash:get() or 0,
+                radius     = cw.radius:get() or 6,
+            }
+            rule.conditions[#rule.conditions + 1] = cond
+        end
+    end
+    return rule
+end
+
+local function _read_all_rules()
+    if not gui.elements.mvr_active_rule_count then return {} end
+    local n = gui.elements.mvr_active_rule_count:get() or 0
+    if n > mrul.MAX_RULES then n = mrul.MAX_RULES end
+    local out = {}
+    for i = 1, n do
+        local r = _read_rule(i)
+        if r then out[#out + 1] = r end
+    end
+    return out
+end
 
 settings.update_settings = function ()
     settings.draw = gui.elements.draw_keybind_toggle:get_state() == 1
@@ -60,6 +125,11 @@ settings.update_settings = function ()
     settings.path_smooth_step          = gui.elements.path_smooth_step:get()
     settings.wall_path                 = gui.elements.wall_path:get()
     settings.wall_path_dist            = gui.elements.wall_path_dist:get()
+    -- Movement revamp
+    if gui.elements.mvr_enabled then
+        settings.movement_revamp = gui.elements.mvr_enabled:get()
+    end
+    settings.movement_rules = _read_all_rules()
 end
 
 return settings

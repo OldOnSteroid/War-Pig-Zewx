@@ -8,6 +8,7 @@ local utils        = require 'core.utils'
 local tracker      = require 'core.tracker'
 local navigator    = require 'core.navigator'
 local long_path    = require 'core.long_path'
+local mhelp        = require 'core.movement_helpers'
 
 local local_player
 local debounce_time = nil
@@ -21,6 +22,9 @@ end
 
 local function update_locals()
     local_player = get_local_player()
+    if local_player then
+        mhelp.observe_buffs(local_player)
+    end
 end
 
 local function main_pulse()

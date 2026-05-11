@@ -46,6 +46,11 @@ local teleport_with_debounce = function ()
     teleport_to_waypoint(settings.town_waypoint)
 end
 
+-- Tracks last cycle completion for restock-stickiness escape. See
+-- HelltideRevamped/tasks/alfred.lua for the full rationale.
+local last_completion_at = nil
+local STUCK_NEED_TRIGGER_GRACE = 30.0
+
 local reset = function ()
     local a = get_alfred()
     if a and not is_steroid() then
@@ -58,6 +63,7 @@ local reset = function ()
     else
         task.status = status_enum['IDLE']
     end
+    last_completion_at = get_time_since_inject()
 end
 
 local function trigger_alfred(use_teleport)
@@ -89,7 +95,23 @@ task.shouldExecute = function ()
 
     -- need_trigger covers inventory_full, repair, restock, etc. — the
     -- documented Steroid signal and also accurate on AlfredTheButler-main.
-    if status.need_trigger then return true end
+    -- Restock-stickiness escape: don't re-fire on persistent need_trigger
+    -- when the last cycle already completed without progress and the only
+    -- sticky flags are restock/stash-extras (see HelltideRevamped for the
+    -- same shape; also mirrors WarPigs orchestrator's alfred_idle escape).
+    if status.need_trigger then
+        local now = get_time_since_inject()
+        local cycle_just_completed = last_completion_at
+            and (now - last_completion_at) < STUCK_NEED_TRIGGER_GRACE
+        if cycle_just_completed
+            and not status.inventory_full
+            and not status.need_repair
+        then
+            -- stuck need_trigger — skip
+        else
+            return true
+        end
+    end
 
     return false
 end
