@@ -339,6 +339,21 @@ end
 local select_node_distance = function ()
     -- get all perimeter (unvisited) of current position
     local perimeter = get_perimeter(explorer.cur_pos)
+    -- Experimental prefer_long_paths: drop perimeter entries closer than the
+    -- threshold so the explorer target produces a path >= threshold. Perimeter
+    -- nodes sit on the radius=12 ring (12..17u from cur_pos), so a 20u
+    -- threshold filters them all and selection falls through to frontiers.
+    local long_filter = settings.prefer_long_paths
+    local long_thresh = settings.long_path_threshold or 20
+    if long_filter then
+        local kept = {}
+        for _, p_node in ipairs(perimeter) do
+            if utils.distance(p_node, explorer.cur_pos) >= long_thresh then
+                kept[#kept+1] = p_node
+            end
+        end
+        perimeter = kept
+    end
     -- furthest from first backtrack
     local furthest_node = nil
     local furthest_node_str = nil
@@ -375,12 +390,19 @@ local select_node_distance = function ()
                 if to_evict == nil then to_evict = {} end
                 to_evict[#to_evict + 1] = node_str
             else
-                local dist  = utils.distance(fnode, check_pos)
-                local score = dist - direction_penalty(fnode, explorer.cur_pos)
-                if furthest_node == nil or score > furthers_dist then
-                    furthest_node     = fnode
-                    furthers_dist     = score
-                    furthest_node_str = node_str
+                -- prefer_long_paths: skip frontiers too close to produce a
+                -- long-enough path. If every frontier is filtered the selector
+                -- falls through to backtrack / pick_closest_frontier (the
+                -- deadlock-prevention path) which ignores the threshold.
+                local d_cur = long_filter and utils.distance(fnode, explorer.cur_pos) or 0
+                if not long_filter or d_cur >= long_thresh then
+                    local dist  = utils.distance(fnode, check_pos)
+                    local score = dist - direction_penalty(fnode, explorer.cur_pos)
+                    if furthest_node == nil or score > furthers_dist then
+                        furthest_node     = fnode
+                        furthers_dist     = score
+                        furthest_node_str = node_str
+                    end
                 end
             end
         end
@@ -445,6 +467,18 @@ end
 local select_node_direction = function (failed)
     -- get all perimeter (unvisited) of current position
     local perimeter = get_perimeter(explorer.cur_pos)
+    -- Experimental prefer_long_paths: see select_node_distance for rationale.
+    local long_filter = settings.prefer_long_paths
+    local long_thresh = settings.long_path_threshold or 20
+    if long_filter then
+        local kept = {}
+        for _, p_node in ipairs(perimeter) do
+            if utils.distance(p_node, explorer.cur_pos) >= long_thresh then
+                kept[#kept+1] = p_node
+            end
+        end
+        perimeter = kept
+    end
     if #perimeter > 0 then
         if explorer.last_dir ~= nil then
             local last_dx = explorer.last_dir[1]
@@ -503,7 +537,10 @@ local select_node_direction = function (failed)
             if to_evict == nil then to_evict = {} end
             to_evict[#to_evict + 1] = node_str
         else
-            if utils.distance(fnode, explorer.cur_pos) <= explorer.frontier_max_dist then
+            local d_cur = utils.distance(fnode, explorer.cur_pos)
+            if d_cur <= explorer.frontier_max_dist
+               and (not long_filter or d_cur >= long_thresh)
+            then
                 local p = direction_penalty(fnode, explorer.cur_pos)
                 if best_node == nil or p < best_penalty then
                     best_node    = fnode

@@ -1,5 +1,5 @@
 local plugin_label = 'batmobile'
-local plugin_version = '2.0.6'
+local plugin_version = '2.0.7'
 console.print("Lua Plugin - Batmobile - Leoric - v" .. plugin_version)
 
 local get_character_class = function (local_player)
@@ -62,6 +62,8 @@ gui.elements = {
     use_demonic_slash = create_checkbox(true, "use_demonic_slash"),
     demonic_slash_los = create_checkbox(true, "demonic_slash_los"),
     min_spell_dist = slider_float:new(1.0, 20.0, 3.0, get_hash(plugin_label .. '_min_spell_dist')),
+    prefer_long_paths = create_checkbox(false, "prefer_long_paths"),
+    long_path_threshold = slider_float:new(10.0, 50.0, 20.0, get_hash(plugin_label .. '_long_path_threshold')),
     require_full_path_explore = create_checkbox(false, "require_full_path_explore"),
     explore_path_budget_ms = slider_int:new(50, 500, 150, get_hash(plugin_label .. '_explore_path_budget_ms')),
     path_smooth_step = slider_float:new(0.0, 10.0, 1.0, get_hash(plugin_label .. '_path_smooth_step')),
@@ -117,6 +119,19 @@ function gui.render()
             'spell will target that node. Raise to stop the bot from burning movement\n' ..
             'cooldowns on tiny hops; lower to let it cast more aggressively on short paths.\n' ..
             'Default 3.0.', 1)
+        gui.elements.prefer_long_paths:render('Prefer long paths (experimental)',
+            'Bias the explorer toward distant targets so each computed path is at least\n' ..
+            'the threshold below in length. Gives movement spells a node ~N units out\n' ..
+            'to actually cast on instead of the explorer picking a 12-unit perimeter hop.\n' ..
+            'Falls back to the normal (closest/direction) pick when no frontier meets the\n' ..
+            'threshold, so the bot still finishes exploration.')
+        if gui.elements.prefer_long_paths:get() then
+            gui.elements.long_path_threshold:render('Preferred path length',
+                'Minimum straight-line distance from the player to an explorer target.\n' ..
+                'Path length is always >= this (the path can only be longer than the\n' ..
+                'straight line), so the movement spell always has a far enough node to\n' ..
+                'target. Default 20.0.', 1)
+        end
         gui.elements.movement_tree:pop()
     end
     gui.elements.require_full_path_explore:render('Full path only (explore)',

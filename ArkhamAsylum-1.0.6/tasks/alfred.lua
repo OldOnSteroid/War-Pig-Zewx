@@ -17,6 +17,25 @@ local task = {
     debounce_timeout = 3
 }
 
+local function get_alfred()
+    return AlfredTheButlerPlugin
+end
+
+-- SteroidAlfredButler exposes create_task; AlfredTheButler-main does not.
+-- See HelltideRevamped/tasks/alfred.lua for the full rationale — short
+-- version: Steroid's Status task monopolises the loop on external_pause,
+-- so calling pause(plugin_label) in reset is poison on that fork.
+local function is_steroid()
+    local a = get_alfred()
+    return a ~= nil and type(a.create_task) == 'function'
+end
+
+local function get_alfred_status()
+    local a = get_alfred()
+    if a then return a.get_status() end
+    return {enabled = false}
+end
+
 local floor_has_loot = function ()
     return loot_manager.any_item_around(get_player_position(), 30, true, true)
 end
@@ -28,10 +47,11 @@ local teleport_with_debounce = function ()
 end
 
 local reset = function ()
-    if AlfredTheButlerPlugin then
-        AlfredTheButlerPlugin.pause(plugin_label)
+    local a = get_alfred()
+    if a and not is_steroid() then
+        a.pause(plugin_label)
     end
-    -- add more stuff here if you need to do something after alfred is done
+    -- Steroid: skip pause to avoid Status-task monopolising the loop.
     if floor_has_loot() then
         task.loot_start = get_time_since_inject()
         task.status = status_enum['LOOTING']
@@ -40,52 +60,68 @@ local reset = function ()
     end
 end
 
-task.shouldExecute = function ()
-    local status = {enabled = false}
-    if AlfredTheButlerPlugin then
-        status = AlfredTheButlerPlugin.get_status()
-        -- Yield to Alfred whenever it's actively processing its queue,
-        -- regardless of who triggered it. WarPigs can externally trigger
-        -- Alfred for greater-affix gear (no need_trigger flag), and we
-        -- must not let lower-priority tasks (kill_monster, explore_pit,
-        -- enter_pit) pull Batmobile away while Alfred is mid-cycle.
-        local alfred_busy = status.enabled and not status.paused
-            and (status.trigger_tasks or status.external_trigger)
-        if (status.enabled and status.need_trigger) or
-            alfred_busy or
-            task.status == status_enum['WAITING'] or
-            task.status == status_enum['LOOTING']
-        then
-            return true
-        end
+local function trigger_alfred(use_teleport)
+    local a = get_alfred()
+    if not a then return end
+    if not is_steroid() then a.resume() end
+    if use_teleport then
+        a.trigger_tasks_with_teleport(plugin_label, reset)
+    else
+        a.trigger_tasks(plugin_label, reset)
     end
+end
+
+task.shouldExecute = function ()
+    local status = get_alfred_status()
+    if not status.enabled then return false end
+
+    -- Hold while we have our own cycle in flight or floor-loot to grab.
+    if task.status == status_enum['WAITING']
+        or task.status == status_enum['LOOTING']
+    then
+        return true
+    end
+
+    -- Yield while Alfred is busy under any caller (WarPigs preamble, etc.).
+    local alfred_busy = (not status.paused)
+        and (status.trigger_tasks or status.external_trigger)
+    if alfred_busy then return true end
+
+    -- need_trigger covers inventory_full, repair, restock, etc. — the
+    -- documented Steroid signal and also accurate on AlfredTheButler-main.
+    if status.need_trigger then return true end
+
     return false
 end
 
 task.Execute = function ()
     BatmobilePlugin.pause(plugin_label)
-    -- If Alfred is busy from a different caller (e.g. WarPigs), hold
-    -- without re-triggering — re-trigger would overwrite the caller's
-    -- external_caller/callback and disrupt the orchestrator's handoff.
-    local status = AlfredTheButlerPlugin and AlfredTheButlerPlugin.get_status() or {}
-    if task.status == status_enum['IDLE']
-        and status.enabled and not status.paused
+    local status = get_alfred_status()
+
+    -- Don't overwrite another caller's in-flight cycle.
+    local alfred_busy = (not status.paused)
         and (status.trigger_tasks or status.external_trigger)
+    if task.status == status_enum['IDLE']
+        and alfred_busy
+        and status.external_caller ~= nil
         and status.external_caller ~= plugin_label
     then
         return
     end
+
     if task.status == status_enum['IDLE'] then
-        if AlfredTheButlerPlugin then
-            AlfredTheButlerPlugin.resume()
-            if utils.player_in_zone(settings.town_zone) then
-                AlfredTheButlerPlugin.trigger_tasks(plugin_label,reset)
-            elseif not floor_has_loot() or not settings.return_for_loot then
-                AlfredTheButlerPlugin.trigger_tasks(plugin_label,reset)
-                teleport_with_debounce()
-            else
-                AlfredTheButlerPlugin.trigger_tasks_with_teleport(plugin_label,reset)
-            end
+        -- Mode selection mirrors upstream: if we're already in town, no
+        -- teleport. If we have floor loot and the setting wants us to
+        -- return for it, use the teleport variant (Alfred handles the
+        -- round-trip). Else do a plain trigger and teleport ourselves
+        -- via teleport_with_debounce so we don't double-channel.
+        if utils.player_in_zone(settings.town_zone) then
+            trigger_alfred(false)
+        elseif not floor_has_loot() or not settings.return_for_loot then
+            trigger_alfred(false)
+            teleport_with_debounce()
+        else
+            trigger_alfred(true)
         end
         task.status = status_enum['WAITING']
     elseif task.status == status_enum['LOOTING'] and get_time_since_inject() > task.loot_start + task.loot_timeout then
@@ -98,6 +134,6 @@ task.Execute = function ()
     end
 end
 
-if settings.enabled and AlfredTheButlerPlugin then reset() end
+if settings.enabled and get_alfred() then reset() end
 
 return task

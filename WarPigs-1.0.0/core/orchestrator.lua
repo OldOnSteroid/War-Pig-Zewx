@@ -34,6 +34,26 @@ local TELEPORT_CHECK_INTERVAL = 3.0
 -- spawn delay seen in logs (Helltide → TurnIn ≈ 1.0s) plus UI render.
 local TELEPORT_INCOMING_SETTLE = 2.5
 
+-- Set by on_alfred_cycle_complete (registered as the callback to
+-- alfred.trigger_tasks). Used to detect "Steroid restock-stickiness":
+-- Steroid recomputes tracker.need_trigger from
+--   inventory_full or need_repair or restock_count > 0 or
+--   need_stash_socketables or need_stash_consumables or need_stash_keys or
+--   talisman_inventory_full
+-- every 0.5s. If e.g. a configured restock item has no stash inventory to
+-- pull from, restock_count stays > 0 forever — every Alfred cycle
+-- completes without making progress and need_trigger flips back to true
+-- on the next tracker pass. Without this guard, alfred_idle() returns
+-- false forever, POST_ALFRED_SETTLE bounces back to TEMIS_ALFRED, and
+-- the orchestrator loops re-triggering Alfred every ~20s (observed in
+-- logzewx 1722 / 1749 / 1773 — three identical no-progress stash cycles).
+local last_alfred_completion_at = nil
+local STUCK_NEED_TRIGGER_GRACE  = 20.0
+
+local function on_alfred_cycle_complete()
+    last_alfred_completion_at = get_time_since_inject()
+end
+
 local function alfred_idle()
     local alfred = _G.AlfredTheButlerPlugin
     if not alfred or type(alfred.get_status) ~= 'function' then return true end
@@ -53,12 +73,29 @@ local function alfred_idle()
     -- external_trigger=true synchronously, but tracker.trigger_tasks doesn't
     -- flip until Alfred's status task Execute runs (1+ ticks later). Treat
     -- the queued state as busy so the TEMIS_ALFRED gate doesn't slip through
-    -- the window between trigger and pickup.
+    -- the window between trigger and pickup. (AlfredTheButler-main only —
+    -- Steroid omits external_trigger from get_status(), so this is nil there.)
     if s.external_trigger then return false end
     -- need_trigger means Alfred itself thinks it has work to do (inventory
-    -- full, need repair, restock pending, etc.). If true and we're polling
-    -- in TEMIS, hold — Alfred's main_pulse will pick this up.
-    if s.need_trigger or s.inventory_full or s.need_repair then return false end
+    -- full, need repair, restock pending, socketables/keys full, etc.). Hold
+    -- so the next teleport doesn't fire before Alfred finishes — EXCEPT
+    -- when the last cycle completed within STUCK_NEED_TRIGGER_GRACE and
+    -- neither inventory_full nor need_repair is set. In that case the
+    -- sticky flag is restock_count / need_stash_* / talisman_inventory_full
+    -- and the cycle that just ran couldn't clear it (restock can't pull
+    -- from an empty stash). Re-triggering immediately won't help; pretend
+    -- to be idle so the orchestrator can proceed to the warplan teleport.
+    if s.need_trigger or s.inventory_full or s.need_repair then
+        local now = get_time_since_inject()
+        if last_alfred_completion_at
+            and (now - last_alfred_completion_at) < STUCK_NEED_TRIGGER_GRACE
+            and not s.inventory_full
+            and not s.need_repair
+        then
+            return true
+        end
+        return false
+    end
     -- trigger_tasks is the live "Alfred is processing its queue" flag —
     -- Alfred's status task sets it true when there's work pending and
     -- clears it when the queue completes. Don't use all_task_done here:
@@ -110,7 +147,7 @@ local function alfred_kick_if_needed()
     last_alfred_kick_at = now
     if type(alfred.resume) == 'function' then pcall(alfred.resume) end
     if type(alfred.trigger_tasks) == 'function' then
-        pcall(alfred.trigger_tasks, 'WarPigs')
+        pcall(alfred.trigger_tasks, 'WarPigs', on_alfred_cycle_complete)
     end
     log('Alfred had work pending but was not processing — resumed and triggered (in town, pre-transition)')
 end
@@ -187,9 +224,16 @@ local function horde_in_chest_opening()
     return ok and state == 'OPENING_CHESTS'
 end
 
--- Resume Alfred if paused, then fire trigger_tasks. Returns true if a trigger
--- was actually issued (Alfred loaded AND enabled). False means caller should
--- skip the TEMIS_ALFRED dwell and go straight to the warplan teleport.
+-- Resume Alfred if paused, then fire trigger_tasks with the completion
+-- callback. Returns true if a trigger was actually issued (Alfred loaded
+-- AND enabled). False means caller should skip the TEMIS_ALFRED dwell
+-- and go straight to the warplan teleport.
+--
+-- The callback (on_alfred_cycle_complete) records last_alfred_completion_at,
+-- which alfred_idle() uses to break the Steroid restock-stickiness loop —
+-- see comments on last_alfred_completion_at above. This mirrors Steroid's
+-- documented create_task pattern (README §create_task) which also passes
+-- a done-callback through trigger_tasks_with_teleport.
 local function alfred_trigger_now()
     local alfred = _G.AlfredTheButlerPlugin
     if not alfred or type(alfred.trigger_tasks) ~= 'function' then return false end
@@ -197,18 +241,14 @@ local function alfred_trigger_now()
         local ok, s = pcall(alfred.get_status)
         if not (ok and type(s) == 'table' and s.enabled) then return false end
     end
-    -- Always call resume() before trigger_tasks. SteroidAlfredButler's
-    -- get_status() omits the paused field, so gating resume on s.paused leaves
-    -- a stale external_pause=true (set by a prior plugin's done-callback, e.g.
-    -- HelltideRevamped/tasks/alfred.lua reset() calling pause(plugin_label))
-    -- in place. With external_pause=true the Steroid Status task's
-    -- shouldExecute returns true every tick on tracker.external_pause and
-    -- monopolises task_manager.execute_tasks (single-task-per-pulse loop), so
-    -- the actual sell/salvage/stash tasks never run and Alfred sits showing
-    -- "Paused by WarPigs" forever. resume() is idempotent — safe to call when
-    -- not paused on either fork.
+    -- resume() before trigger_tasks. On AlfredTheButler-main this clears
+    -- any external_pause set by a prior activity plugin's reset() callback
+    -- (HelltideRevamped/WonderCity/Arkham/etc. all pause(plugin_label) on
+    -- that fork). On Steroid our updated activity plugins no longer call
+    -- pause() in reset, so external_pause stays false — but resume() is
+    -- idempotent and harmless to call either way. Cheap insurance.
     if type(alfred.resume) == 'function' then pcall(alfred.resume) end
-    pcall(alfred.trigger_tasks, 'WarPigs')
+    pcall(alfred.trigger_tasks, 'WarPigs', on_alfred_cycle_complete)
     return true
 end
 
@@ -1860,6 +1900,7 @@ function orchestrator.release_all()
     teleport_transition.snap_zone         = nil
     teleport_transition.last_temis_tp     = -math.huge
     last_alfred_kick_at                   = -math.huge
+    last_alfred_completion_at             = nil
     teleport_transition.alfred_fired_at   = nil
     teleport_transition.alfred_was_busy   = false
     teleport_transition.alfred_picked_up  = false

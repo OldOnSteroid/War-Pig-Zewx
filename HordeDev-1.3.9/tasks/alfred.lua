@@ -14,54 +14,85 @@ local task = {
     status = status_enum['IDLE']
 }
 
+local function get_alfred()
+    return AlfredTheButlerPlugin or PLUGIN_alfred_the_butler
+end
+
+-- SteroidAlfredButler exposes create_task; AlfredTheButler-main does not.
+-- See HelltideRevamped/tasks/alfred.lua for the full rationale.
+local function is_steroid()
+    local a = get_alfred()
+    return a ~= nil and type(a.create_task) == 'function'
+end
+
+local function get_alfred_status()
+    local a = get_alfred()
+    if a then return a.get_status() end
+    return {enabled = false}
+end
+
 local function reset()
-    if AlfredTheButlerPlugin then
-        AlfredTheButlerPlugin.pause(plugin_label)
-    elseif PLUGIN_alfred_the_butler then
-        PLUGIN_alfred_the_butler.pause(plugin_label)
+    local a = get_alfred()
+    if a and not is_steroid() then
+        a.pause(plugin_label)
     end
-    -- add more stuff here if you need to do something after alfred is done
+    -- Steroid: skip pause to avoid Status-task monopolising the loop.
     tracker.has_salvaged = true
     tracker.needs_salvage = false
     task.status = status_enum['IDLE']
 end
 
+local function trigger_alfred()
+    local a = get_alfred()
+    if not a then return end
+    if not is_steroid() then a.resume() end
+    a.trigger_tasks_with_teleport(plugin_label, reset)
+end
+
 function task.shouldExecute()
-    if settings.use_alfred then
-        local status = {enabled = false}
-        if AlfredTheButlerPlugin then
-            status = AlfredTheButlerPlugin.get_status()
-        elseif PLUGIN_alfred_the_butler then
-            status = PLUGIN_alfred_the_butler.get_status()
-        end
-        -- add additional conditions to trigger if required
-        if (status.enabled and tracker.needs_salvage) or
-            task.status == status_enum['WAITING']
-        then
-            return true
-        end
-    end
+    if not settings.use_alfred then return false end
+    local status = get_alfred_status()
+    if not status.enabled then return false end
+
+    -- Yield while Alfred is busy under any caller.
+    local alfred_busy = (not status.paused)
+        and (status.trigger_tasks or status.external_trigger)
+    if alfred_busy then return true end
+
+    -- Hold while we have our own cycle in flight.
+    if task.status == status_enum['WAITING'] then return true end
+
+    -- Horde-specific gating: don't react to need_trigger while inside BSK
+    -- — exiting the horde world mid-run loses the wave. Outside BSK is
+    -- fine (only fires between hordes, which is when this task's parent
+    -- script wants Alfred to run anyway). tracker.needs_salvage is set
+    -- explicitly by horde-exit logic and is always safe to honour.
+    if tracker.needs_salvage then return true end
+
     return false
 end
 
 function task.Execute()
+    local status = get_alfred_status()
+
+    -- Don't overwrite another caller's in-flight cycle.
+    local alfred_busy = (not status.paused)
+        and (status.trigger_tasks or status.external_trigger)
+    if task.status == status_enum['IDLE']
+        and alfred_busy
+        and status.external_caller ~= nil
+        and status.external_caller ~= plugin_label
+    then
+        return
+    end
+
     if task.status == status_enum['IDLE'] then
-        if AlfredTheButlerPlugin then
-            AlfredTheButlerPlugin.resume()
-            -- AlfredTheButlerPlugin.trigger_tasks(plugin_label,reset)
-            AlfredTheButlerPlugin.trigger_tasks_with_teleport(plugin_label,reset)
-        elseif PLUGIN_alfred_the_butler then
-            PLUGIN_alfred_the_butler.resume()
-            -- PLUGIN_alfred_the_butler.trigger_tasks(plugin_label,reset)
-            PLUGIN_alfred_the_butler.trigger_tasks_with_teleport(plugin_label,reset)
-        end
+        trigger_alfred()
         task.status = status_enum['WAITING']
     end
 end
 
-if settings.enabled and settings.salvage and
-    (AlfredTheButlerPlugin or PLUGIN_alfred_the_butler)
-then
+if settings.enabled and settings.salvage and get_alfred() then
     -- do an initial reset
     reset()
 end
