@@ -1,5 +1,6 @@
-local gui  = require 'gui'
-local mrul = require 'core.movement_rules'
+local gui   = require 'gui'
+local mrul  = require 'core.movement_rules'
+local mhelp = require 'core.movement_helpers'
 
 local settings = {
     plugin_label = gui.plugin_label,
@@ -72,12 +73,24 @@ local function _read_rule(slot)
             local type_idx = (cw.type:get() or 0) + 1
             local type_key = (mrul.condition_types[type_idx] or { key = 'none' }).key
             local op_idx   = (cw.op:get() or 0) + 1
+            -- Buff hash resolution (UR pattern): the explicit slider wins
+            -- when set; else fall back to the combo's current selection
+            -- mapped through the grow-only catalog. Combo index is clamped
+            -- to the catalog length as a defensive guard.
+            local buff_hash = cw.buff_hash:get() or 0
+            if buff_hash == 0 then
+                local bc_idx = cw.buff_combo:get() or 0
+                local catalog_len = #mhelp.known_buffs_ordered
+                if bc_idx > catalog_len then bc_idx = catalog_len end
+                if bc_idx < 0 then bc_idx = 0 end
+                buff_hash = mhelp.buff_hash_for_combo_index(bc_idx) or 0
+            end
             local cond = {
                 combinator = (cw.combinator:get() == 1) and 'OR' or 'AND',
                 type       = type_key,
                 op         = mrul.ops[op_idx] or '<',
                 value      = cw.value:get() or 0,
-                buff_hash  = cw.buff_hash:get() or 0,
+                buff_hash  = buff_hash,
                 radius     = cw.radius:get() or 6,
             }
             rule.conditions[#rule.conditions + 1] = cond

@@ -101,7 +101,6 @@ end
 gui.elements.mvr_enabled  = checkbox:new(false, _mvr_hash('enabled'))
 gui.elements.mvr_tree     = tree_node:new(0)
 gui.elements.mvr_active_rule_count = slider_int:new(0, mrul.MAX_RULES, 0, _mvr_hash('active_rule_count'))
-gui.elements.mvr_add_rule_btn      = keybind:new(0x0A, true, _mvr_hash('add_rule_btn'))
 
 gui.elements.mvr_rule_widgets = {}
 for r = 1, mrul.MAX_RULES do
@@ -116,7 +115,6 @@ for r = 1, mrul.MAX_RULES do
         cond_tree         = tree_node:new(0),
         active_cond_count = slider_int:new(0, mrul.MAX_CONDITIONS_PER_RULE, 0,
                                            _mvr_hash(rp .. 'active_cond_count')),
-        add_cond_btn      = keybind:new(0x0A, true, _mvr_hash(rp .. 'add_cond_btn')),
         cond_widgets      = {},
     }
     for c = 1, mrul.MAX_CONDITIONS_PER_RULE do
@@ -134,11 +132,6 @@ for r = 1, mrul.MAX_RULES do
     end
     gui.elements.mvr_rule_widgets[r] = rw
 end
-
--- Side table: tracks the previous-frame combo index for each (rule, cond)
--- buff combo so we can detect a user change and write the buff_hash slider
--- accordingly. Keyed by "r_c" string.
-gui._mvr_prev_buff_combo_idx = {}
 
 -- Build display labels for the skill combo. Catalog order is stable;
 -- unequipped skills get a "(unequipped)" suffix as a hint, but stay
@@ -171,28 +164,40 @@ function gui.render_movement_revamp()
     if not gui.elements.mvr_tree:push('Movement Rules') then return end
 
     render_menu_header("Rules are evaluated in slot order. First match casts.")
-
-    -- Add-rule keybind button: increments the active-rule slider on press.
-    if gui.elements.mvr_add_rule_btn:get_state() == 1 then
-        gui.elements.mvr_add_rule_btn:set(false)
-        local cur = gui.elements.mvr_active_rule_count:get() or 0
-        if cur < mrul.MAX_RULES then
-            gui.elements.mvr_active_rule_count:set(cur + 1)
-        end
-    end
-    gui.elements.mvr_add_rule_btn:render('+ Add rule', 'Increment active rule count')
+    render_menu_header("Drag 'Number of rules' to add/remove rule slots.")
     gui.elements.mvr_active_rule_count:render('Number of rules',
-        'Number of active rule slots (0 = revamp disabled).')
+        'Number of active rule slots (0 = revamp disabled). Drag to add or remove.')
 
     local skill_items = _build_skill_labels()
     local cast_items  = mrul.cast_position_labels
     local type_items  = mrul.condition_labels
     local op_items    = mrul.op_labels
     local combinator_items = mrul.combinators
-    local buff_items  = mhelp.buff_combo_items()
 
     local active_rules = gui.elements.mvr_active_rule_count:get() or 0
     if active_rules > mrul.MAX_RULES then active_rules = mrul.MAX_RULES end
+
+    -- UR-style: seed the catalog with any user-saved hashes BEFORE building
+    -- buff_items so the combo always has those entries available on reload.
+    local seed_ok, seed_err = pcall(function ()
+        for r = 1, active_rules do
+            local rw = gui.elements.mvr_rule_widgets[r]
+            if rw then
+                local nconds = rw.active_cond_count:get() or 0
+                if nconds > mrul.MAX_CONDITIONS_PER_RULE then
+                    nconds = mrul.MAX_CONDITIONS_PER_RULE
+                end
+                for c = 1, nconds do
+                    local cw = rw.cond_widgets[c]
+                    if cw then mhelp.seed_buff_hash(cw.buff_hash:get() or 0) end
+                end
+            end
+        end
+    end)
+    if not seed_ok then
+        console.print('[mvr] seed_buff_hash pass failed: ' .. tostring(seed_err))
+    end
+    local buff_items = mhelp.buff_combo_items()
 
     for r = 1, active_rules do
         local rw = gui.elements.mvr_rule_widgets[r]
@@ -222,16 +227,9 @@ function gui.render_movement_revamp()
 
                 -- Conditions
                 if rw.cond_tree:push('Conditions') then
-                    if rw.add_cond_btn:get_state() == 1 then
-                        rw.add_cond_btn:set(false)
-                        local cur = rw.active_cond_count:get() or 0
-                        if cur < mrul.MAX_CONDITIONS_PER_RULE then
-                            rw.active_cond_count:set(cur + 1)
-                        end
-                    end
-                    rw.add_cond_btn:render('+ Add condition', 'Increment active conditions for this rule')
                     rw.active_cond_count:render('Number of conditions',
-                        'Number of active condition rows for this rule (0 = always passes).')
+                        'Number of active condition rows for this rule (0 = always passes).\n' ..
+                        'Drag to add or remove condition slots.')
 
                     local active_conds = rw.active_cond_count:get() or 0
                     if active_conds > mrul.MAX_CONDITIONS_PER_RULE then
@@ -241,55 +239,48 @@ function gui.render_movement_revamp()
                     for c = 1, active_conds do
                         local cw = rw.cond_widgets[c]
                         if cw then
-                            render_menu_header(string.format('— Condition %d —', c))
-                            -- First row's combinator has no effect (it seeds the fold),
-                            -- but we still render it so the user has a consistent layout.
-                            cw.combinator:render('Combinator', combinator_items,
-                                'How this row combines with the running result of prior rows.\n' ..
-                                '(The first condition\'s combinator is ignored.)')
-                            cw.type:render('Type', type_items,
-                                'What this condition checks. "(none)" disables this row.')
+                            local ok, err = pcall(function ()
+                                local id_suffix = ' (' .. c .. ')'
+                                render_menu_header(string.format('-- Condition %d --', c))
+                                cw.combinator:render('Combinator' .. id_suffix, combinator_items,
+                                    'AND/OR combinator with prior rows. (First row ignored.)')
+                                cw.type:render('Type' .. id_suffix, type_items,
+                                    'What this condition checks. "(none)" disables this row.')
 
-                            -- combo_box:get() is 0-indexed; +1 to hit the 1-indexed Lua items table.
-                            local type_idx = (cw.type:get() or 0) + 1
-                            local type_entry = mrul.condition_types[type_idx] or { key = 'none' }
-                            local meta       = mrul.condition_meta_by_key[type_entry.key] or {}
+                                local type_idx = (cw.type:get() or 0) + 1
+                                local type_entry = mrul.condition_types[type_idx] or { key = 'none' }
+                                local meta       = mrul.condition_meta_by_key[type_entry.key] or {}
 
-                            if meta.uses_buff then
-                                cw.buff_combo:render('Buff', buff_items,
-                                    'Pick from buffs observed on the player so far this session.\n' ..
-                                    'The actual hash is persisted separately so the selection survives\n' ..
-                                    'script reload even before the buff list is repopulated.')
-                                -- Change-detection: when the user navigates the combo, write the
-                                -- corresponding hash into the persistent slider. Never :set() the
-                                -- combo itself (combo :set() on a dynamic list has historically
-                                -- crashed). Initial render frame just records prev without writing.
-                                local key = r .. '_' .. c
-                                local prev = gui._mvr_prev_buff_combo_idx[key]
-                                -- 0-indexed: 0 = "(none)", >=1 = nth observed buff
-                                local cur_idx = cw.buff_combo:get() or 0
-                                if prev ~= nil and cur_idx ~= prev then
-                                    local new_hash = mhelp.buff_hash_for_combo_index(cur_idx) or 0
-                                    cw.buff_hash:set(new_hash)
+                                if meta.uses_buff then
+                                    local saved_hash = cw.buff_hash:get() or 0
+                                    if saved_hash > 0 then
+                                        local entry = mhelp.known_buffs_by_hash[saved_hash]
+                                        local nm = (entry and entry.name) or ('Buff hash ' .. tostring(saved_hash))
+                                        render_menu_header('Saved buff: ' .. nm .. ' (hash=' .. saved_hash .. ')')
+                                    else
+                                        render_menu_header('Saved buff: combo selection')
+                                    end
+                                    cw.buff_combo:render('Buff' .. id_suffix, buff_items,
+                                        'Pick from observed/seeded buffs. Engine prefers hash slider below.')
+                                    cw.buff_hash:render('  buff hash (override)' .. id_suffix,
+                                        'Explicit buff hash. When > 0 the engine uses this directly.')
                                 end
-                                gui._mvr_prev_buff_combo_idx[key] = cur_idx
-                                -- Show the persisted hash as a read-only hint via tooltip on the slider.
-                                cw.buff_hash:render('  buff hash (auto)',
-                                    'Persisted buff hash (auto-updated when you change the buff dropdown).\n' ..
-                                    'Survives script reload even if the buff list is empty at startup.')
-                            end
 
-                            if meta.uses_op then
-                                cw.op:render('Op', op_items,
-                                    'Comparison operator applied to the condition\'s value.')
-                                cw.value:render('Value',
-                                    'Right-hand side of the comparison (stacks, distance, pack size).')
-                            end
+                                if meta.uses_op then
+                                    cw.op:render('Op' .. id_suffix, op_items,
+                                        'Comparison operator.')
+                                    cw.value:render('Value' .. id_suffix,
+                                        'Right-hand side of the comparison.')
+                                end
 
-                            if meta.uses_radius then
-                                cw.radius:render('Search radius',
-                                    'For "Pack size on path": radius (in units) around each path\n' ..
-                                    'node used to count enemies; the densest node\'s count is compared.')
+                                if meta.uses_radius then
+                                    cw.radius:render('Search radius' .. id_suffix,
+                                        'Radius used for Pack-size-on-path.')
+                                end
+                            end)
+                            if not ok then
+                                console.print('[mvr] render condition r=' .. r .. ' c=' .. c
+                                    .. ' failed: ' .. tostring(err))
                             end
                         end
                     end
