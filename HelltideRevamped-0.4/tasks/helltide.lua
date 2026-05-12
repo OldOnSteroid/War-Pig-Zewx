@@ -26,6 +26,7 @@ local remembered_chest_long_path_ok = false      -- true if navigate_long_path s
 -- returns to EXPLORE_HELLTIDE patrol and naturally moves elsewhere; once the
 -- blacklist expires, the chest can be re-targeted from a different angle.
 local chest_temp_blacklist = {}                    -- key -> expiry timestamp
+local chest_blacklist_data = {}                    -- key -> {pos, expiry, name} for debug rendering
 local CHEST_BLACKLIST_DURATION   = 60.0            -- seconds to skip a stuck chest
 local CHEST_STUCK_WINDOW         = 12.0            -- no progress for this long = stuck
 local CHEST_STUCK_PROGRESS       = 4.0             -- meters of distance reduction = "progress"
@@ -46,7 +47,7 @@ local CHEST_MICROPARTIAL_PLEN_MAX  = 2             -- plen at or below this coun
 -- Suppress the no-progress / micro-partial blacklisters in this radius so a
 -- monster interrupting the open animation doesn't wipe a reachable chest.
 local CHEST_INTERACT_RANGE         = 6             -- meters: treat as "in interaction"
-local CHEST_STUCK_COMBAT_RANGE     = 25            -- meters: refresh stuck window if a hostile is this close
+local CHEST_STUCK_COMBAT_RANGE     = 10            -- meters: refresh stuck window if a hostile is this close
 -- When monsters are blocking a chest interaction, force orbwalker clear ON for
 -- this long (overrides the >149-cinders gate) so they actually get killed.
 -- Re-asserted every tick we still see blocking combat.
@@ -1035,6 +1036,7 @@ local function find_affordable_remembered_chest()
                 goto continue
             end
             chest_temp_blacklist[key] = nil  -- expired
+            chest_blacklist_data[key] = nil
         end
         if current_cinders >= entry.cost and utils.distance_to(entry.position) <= REMEMBERED_CHEST_MAX_DIST then
             if not best_entry or entry.cost < best_entry.cost then
@@ -1064,6 +1066,17 @@ local TRAV_NAV_TIMEOUT = 20       -- seconds before giving up on reaching a trav
 local km_unreachable = {}
 local KM_UNREACHABLE_TIMEOUT = 30
 local km_nav_map = {}  -- per-position progress tracking: key -> {time, dist}
+
+-- Micro-partial detector (mirrors the patrol_micropartial pattern). When A*
+-- returns `limit_partial` with plen<=2 against the same enemy for N consecutive
+-- pathfinds, the target is behind unwalkable terrain — mark it unreachable
+-- without waiting the full 5s distance-stall timeout.
+local KM_MICROPARTIAL_THRESHOLD = 20  -- consecutive bad pathfinds against the same target (~1.5-2s at 80ms tick)
+local KM_MICROPARTIAL_PLEN_MAX  = 2
+local KM_MICROPARTIAL_GOAL_TOL  = 3   -- meters: enemy can drift slightly while we re-pathfind
+local _km_micropartial_count    = 0
+local _km_micropartial_last_id  = 0
+local _km_micropartial_key      = nil  -- nav_key of the target the counter belongs to
 
 local function km_is_unreachable(pos)
     local now = get_time_since_inject()
@@ -1129,7 +1142,20 @@ local function get_kill_target()
         end
         ::continue::
     end
-    local result = closest_boss or closest_champ or closest_elite or closest_enemy
+    -- Rarity floor: drop tiers below the user's selection so we don't route
+    -- to plain trash when they only want elites/champions/bosses.
+    -- 0=All, 1=Rare+ (elite floor), 2=Champion+ (champion floor), 3=Boss only.
+    local rarity = settings.kill_monsters_rarity or 0
+    local result
+    if rarity >= 3 then
+        result = closest_boss
+    elseif rarity == 2 then
+        result = closest_boss or closest_champ
+    elseif rarity == 1 then
+        result = closest_boss or closest_champ or closest_elite
+    else
+        result = closest_boss or closest_champ or closest_elite or closest_enemy
+    end
     perf.stop("get_kill_target")
     km_target_cache = result
     km_cache_valid = true  -- mark valid even when result is nil (no targets found)
@@ -1197,6 +1223,7 @@ local function check_events(self)
                     if bl then
                         if bl > now_bl then goto continue_chest_scan end
                         chest_temp_blacklist[key] = nil
+                        chest_blacklist_data[key] = nil
                     end
                     if remembered_chests[key] then
                         console.print(string.format("[CHEST RECALL] Opening previously remembered %s", chest_name))
@@ -2451,6 +2478,7 @@ local helltide_task = {
                         "[HELLTIDE CHEST] %s combat-blocked at chest %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
                         found_chest, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
                     chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+                    chest_blacklist_data[hkey] = {pos = found_chest_position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = found_chest}
                     found_chest = nil
                     found_chest_position = nil
                     pre_interact_cinders = nil
@@ -2482,6 +2510,7 @@ local helltide_task = {
                         "[HELLTIDE CHEST] %s combat-blocked en route %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
                         found_chest, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
                     chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+                    chest_blacklist_data[hkey] = {pos = found_chest_position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = found_chest}
                     found_chest = nil
                     found_chest_position = nil
                     pre_interact_cinders = nil
@@ -2497,6 +2526,7 @@ local helltide_task = {
                     "[HELLTIDE CHEST] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
                     found_chest, dist_to_saved, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
                 chest_temp_blacklist[hkey] = now_t + CHEST_BLACKLIST_DURATION
+                chest_blacklist_data[hkey] = {pos = found_chest_position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = found_chest}
                 found_chest = nil
                 found_chest_position = nil
                 pre_interact_cinders = nil
@@ -2684,6 +2714,7 @@ local helltide_task = {
                         "[CHEST RECALL] %s combat-blocked at chest %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
                         entry.name, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
                     chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                    chest_blacklist_data[remembered_chest_target] = {pos = entry.position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = entry.name}
                     if has_batmobile and BatmobilePlugin.stop_long_path then
                         BatmobilePlugin.stop_long_path(plugin_label)
                     end
@@ -2715,6 +2746,7 @@ local helltide_task = {
                         "[CHEST RECALL] %s combat-blocked en route %.1fs (cap %.1fs) — blacklisting %.0fs and resuming patrol",
                         entry.name, now_t - _chest_combat_block_t, CHEST_COMBAT_BLOCK_LIMIT, CHEST_BLACKLIST_DURATION))
                     chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                    chest_blacklist_data[remembered_chest_target] = {pos = entry.position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = entry.name}
                     if has_batmobile and BatmobilePlugin.stop_long_path then
                         BatmobilePlugin.stop_long_path(plugin_label)
                     end
@@ -2731,6 +2763,7 @@ local helltide_task = {
                     "[CHEST RECALL] Stuck near %s (dist=%.1f, no >%.1fm progress in %.1fs) — blacklisting %.0fs and resuming patrol",
                     entry.name, dist, CHEST_STUCK_PROGRESS, now_t - _chest_stuck_t, CHEST_BLACKLIST_DURATION))
                 chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                chest_blacklist_data[remembered_chest_target] = {pos = entry.position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = entry.name}
                 if has_batmobile and BatmobilePlugin.stop_long_path then
                     BatmobilePlugin.stop_long_path(plugin_label)
                 end
@@ -2762,6 +2795,7 @@ local helltide_task = {
                             "[CHEST RECALL] %s unreachable (%d consecutive plen<=%d limit_partial pathfinds, dist=%.1f) — blacklisting %.0fs and resuming patrol",
                             entry.name, _chest_micropartial_count, CHEST_MICROPARTIAL_PLEN_MAX, dist, CHEST_BLACKLIST_DURATION))
                         chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                        chest_blacklist_data[remembered_chest_target] = {pos = entry.position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = entry.name}
                         if has_batmobile and BatmobilePlugin.stop_long_path then
                             BatmobilePlugin.stop_long_path(plugin_label)
                         end
@@ -2901,6 +2935,7 @@ local helltide_task = {
                     "[CHEST RECALL] no progress toward %s for %ds (best=%.1f cur=%.1f) — blacklisting %.0fs and resuming patrol",
                     entry.name, RECALL_NO_PROGRESS_SECS, _recall_best_dist, dist, CHEST_BLACKLIST_DURATION))
                 chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                chest_blacklist_data[remembered_chest_target] = {pos = entry.position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = entry.name}
                 if BatmobilePlugin.stop_long_path then
                     BatmobilePlugin.stop_long_path(plugin_label)
                 end
@@ -2945,6 +2980,7 @@ local helltide_task = {
                             "[CHEST RECALL] %d consecutive long_path failures — blacklisting %s for %.0fs and resuming patrol",
                             RECALL_FAIL_THRESHOLD, entry.name, CHEST_BLACKLIST_DURATION))
                         chest_temp_blacklist[remembered_chest_target] = now_t + CHEST_BLACKLIST_DURATION
+                        chest_blacklist_data[remembered_chest_target] = {pos = entry.position, expiry = now_t + CHEST_BLACKLIST_DURATION, name = entry.name}
                         if BatmobilePlugin.stop_long_path then
                             BatmobilePlugin.stop_long_path(plugin_label)
                         end
@@ -3141,6 +3177,9 @@ local helltide_task = {
         if not target then
             if BatmobilePlugin then BatmobilePlugin.clear_target(plugin_label) end
             console.print("[KILL MONSTERS] No targets, resuming patrol")
+            _km_micropartial_count = 0
+            _km_micropartial_last_id = 0
+            _km_micropartial_key = nil
             clear_movement()
             self.current_state = helltide_state.EXPLORE_HELLTIDE
             return
@@ -3162,8 +3201,18 @@ local helltide_task = {
         elseif now - nav.time > 5 then
             km_nav_map[nav_key] = nil
             km_mark_unreachable(target_pos)
+            _km_micropartial_count = 0
+            _km_micropartial_last_id = 0
+            _km_micropartial_key = nil
             if BatmobilePlugin then BatmobilePlugin.clear_target(plugin_label) end
             return
+        end
+
+        -- Reset micro-partial counter on target switch so a fresh enemy starts clean
+        if _km_micropartial_key ~= nav_key then
+            _km_micropartial_key = nav_key
+            _km_micropartial_count = 0
+            _km_micropartial_last_id = 0
         end
 
         if cur_dist > 2 then
@@ -3179,8 +3228,43 @@ local helltide_task = {
                     perf.inc("km_set_target_rejected")
                     km_mark_unreachable(target_pos)
                     km_nav_map[nav_key] = nil
+                    _km_micropartial_count = 0
+                    _km_micropartial_last_id = 0
+                    _km_micropartial_key = nil
                     BatmobilePlugin.clear_target(plugin_label)
                     return
+                end
+                -- Micro-partial detector: A* returning plen<=2 limit_partial against
+                -- the same enemy for ~20 consecutive pathfinds = behind unwalkable
+                -- terrain. Catches "ledge geometry" cases ~3s faster than the 5s
+                -- distance-stall timeout above. Mirrors patrol_micropartial.
+                if BatmobilePlugin.get_last_pathfind then
+                    local pf = BatmobilePlugin.get_last_pathfind()
+                    if pf and pf.call_id ~= _km_micropartial_last_id then
+                        _km_micropartial_last_id = pf.call_id
+                        local goal_match = math.abs(pf.goal_x - target_pos:x()) < KM_MICROPARTIAL_GOAL_TOL
+                                           and math.abs(pf.goal_y - target_pos:y()) < KM_MICROPARTIAL_GOAL_TOL
+                        if goal_match
+                           and pf.status == "limit_partial"
+                           and pf.plen <= KM_MICROPARTIAL_PLEN_MAX
+                        then
+                            _km_micropartial_count = _km_micropartial_count + 1
+                            if _km_micropartial_count >= KM_MICROPARTIAL_THRESHOLD then
+                                console.print(string.format(
+                                    "[KILL MONSTERS] Micro-partial threshold hit (n=%d plen<=%d) — marking unreachable",
+                                    _km_micropartial_count, KM_MICROPARTIAL_PLEN_MAX))
+                                km_mark_unreachable(target_pos)
+                                km_nav_map[nav_key] = nil
+                                _km_micropartial_count = 0
+                                _km_micropartial_last_id = 0
+                                _km_micropartial_key = nil
+                                BatmobilePlugin.clear_target(plugin_label)
+                                return
+                            end
+                        else
+                            _km_micropartial_count = 0
+                        end
+                    end
                 end
                 -- Respect the 10Hz throttle: enemies don't move fast enough that
                 -- 100ms of nav staleness affects targeting, but each forced pulse
@@ -3322,8 +3406,60 @@ local helltide_task = {
 }
 
 on_render(function()
+    -- Farm boundary circle (always drawn when active)
     if farm_chest_entry then
         graphics.circle_3d(farm_chest_entry.position, 50, color_green(150))
+    end
+
+    if not settings.draw_chest_status then return end
+
+    local now_r = get_time_since_inject()
+
+    local function chest_label(pos, top_line, bot_line, circle_color, text_color)
+        graphics.circle_3d(pos, 3, circle_color)
+        local lp = vec3:new(pos:x(), pos:y(), pos:z() + 2.5)
+        graphics.text_3d(top_line, lp, 13, text_color)
+        if bot_line then
+            local lp2 = vec3:new(pos:x(), pos:y(), pos:z() + 1.2)
+            graphics.text_3d(bot_line, lp2, 11, text_color)
+        end
+    end
+
+    -- ACTIVE: chest being moved to right now
+    if found_chest_position then
+        local label = found_chest or "chest"
+        chest_label(found_chest_position, "ACTIVE", label, color_orange(220), color_orange(255))
+    end
+
+    -- SILENT: silent chest being moved to
+    if found_silent_chest_position then
+        chest_label(found_silent_chest_position, "SILENT", nil, color_white(200), color_white(255))
+    end
+
+    -- FARMING: chest we are farming cinders near (label + separate from the boundary circle)
+    if farm_chest_entry then
+        local need = farm_chest_entry.cost - get_helltide_coin_cinders()
+        chest_label(farm_chest_entry.position, "FARMING", string.format("need %d cinders", math.max(0, need)), color_green(220), color_green(255))
+    end
+
+    -- REMEMBERED / RECALLING
+    for key, entry in pairs(remembered_chests) do
+        if key == remembered_chest_target then
+            chest_label(entry.position, "RECALLING", entry.name, color_yellow(220), color_yellow(255))
+        else
+            chest_label(entry.position, "REMEMBERED", string.format("%d cinders", entry.cost), color_white(160), color_white(200))
+        end
+    end
+
+    -- BLACKLISTED
+    for key, data in pairs(chest_blacklist_data) do
+        local remaining = data.expiry - now_r
+        if remaining > 0 then
+            local name_short = data.name or "chest"
+            chest_label(data.pos, "BLACKLISTED", string.format("%s (%.0fs)", name_short, remaining), color_red(220), color_red(255))
+        else
+            chest_blacklist_data[key] = nil
+        end
     end
 end)
 

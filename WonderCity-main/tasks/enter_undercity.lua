@@ -16,6 +16,14 @@ local status_enum = {
 
 local CLICK_DELAY = 2.0  -- seconds to wait after every click action
 
+-- After the OPEN_PORTAL click the game starts processing the portal submission.
+-- After ACCEPT the game begins loading the undercity zone. During both windows
+-- some actors enter a transitional/freeing state; calling any actor method on
+-- them causes a hard (C++) crash that pcall cannot catch. Skip all actor
+-- queries for this period.
+local POST_OPEN_PORTAL_GUARD = 2.5
+local POST_ACCEPT_GUARD       = 5.0
+
 -- Brazier interact retry watchdog. The walk branch stops at distance <= 2,
 -- but the game's actual interaction range can be tighter than that. If
 -- interact_object() is spammed with no vendor screen response, lower the
@@ -476,6 +484,25 @@ task.Execute = function ()
     local local_player = get_local_player()
     if not local_player then return end
     BatmobilePlugin.pause(plugin_label)
+
+    -- Guard against all actor queries during the post-click transition windows.
+    -- The game can free/invalidate actor objects during portal submission and
+    -- zone loading; iterating get_all_actors() in those windows hard-crashes.
+    local now = get_time_since_inject()
+    if task.step == STEP.OPEN_PORTAL_WAIT and
+       task.step_time > 0 and
+       now < task.step_time + POST_OPEN_PORTAL_GUARD
+    then
+        task.status = status_enum['WAITING'] .. 'portal-click settle'
+        return
+    end
+    if task.step == STEP.ACCEPT_WAIT and
+       task.step_time > 0 and
+       now < task.step_time + POST_ACCEPT_GUARD
+    then
+        task.status = status_enum['WAITING'] .. 'accept-click settle'
+        return
+    end
 
     local player_pos = local_player:get_position()
     local spirit_brazier = utils.get_spirit_brazier()

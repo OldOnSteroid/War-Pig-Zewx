@@ -717,6 +717,8 @@ navigator.reset_movement = function ()
     navigator.partial_target_best_dist = math.huge
     navigator.partial_target_last_progress_time = -1
     navigator.last_trav_route_attempt_time = -1
+    navigator.move_spell_pre_cast_pos = nil
+    navigator.move_spell_fail_count = 0
 end
 
 -- record_failed_direction: called whenever we abandon a target (partial-path
@@ -1207,6 +1209,16 @@ navigator.move = function ()
 
     -- movement spells
     tracker.bench_start("nav_move_spell")
+    if navigator.move_spell_pre_cast_pos ~= nil then
+        local moved = utils.distance(cur_node, navigator.move_spell_pre_cast_pos)
+        navigator.move_spell_pre_cast_pos = nil
+        if moved < 2.0 then
+            navigator.move_spell_fail_count = (navigator.move_spell_fail_count or 0) + 1
+            console.print(string.format('[move_spell] blocked: moved=%.1f fail=%d/3', moved, navigator.move_spell_fail_count))
+        else
+            navigator.move_spell_fail_count = 0
+        end
+    end
     if not utils.player_in_town() and #navigator.path > 0 then
         local movement_spell_id, need_raycast, spell_range, override_pos, override_idx = get_movement_spell_id(local_player)
         if movement_spell_id ~= nil then
@@ -1299,25 +1311,33 @@ navigator.move = function ()
                     end
                 end
                 if raycast_success then
-                    local success = cast_spell.position(movement_spell_id, spell_node, 0)
-                    console.print('[move_spell] cast_spell.position -> ' .. tostring(success))
-                    if success then
-                        utils.log(2, 'movement spell to ' .. utils.vec_to_string(spell_node))
-                        tracker.bench_count("move_spell_cast")
-                        if not navigator.paused then navigator.update() end
-                        player_pos = local_player:get_position()
-                        cur_node = utils.normalize_node(player_pos)
-                        -- Host-side position update can lag the dash/teleport by a tick
-                        -- or two. Without this, the next find_path runs from the pre-cast
-                        -- position and either returns a path that backtracks or fails
-                        -- outright. Overriding last_pos to the spell destination + a
-                        -- short replan cooldown keeps subsequent pathfinds anchored
-                        -- where we actually are.
-                        navigator.last_pos = utils.normalize_node(spell_node)
-                        navigator.pathfind_replan_cooldown = get_time_since_inject() + 0.3
-                        navigator.path = new_path
-                        local node_str = utils.vec_to_string(spell_node)
-                        navigator.blacklisted_spell_node[node_str] = spell_node
+                    if (navigator.move_spell_fail_count or 0) >= 3 then
+                        console.print('[move_spell] 3 consecutive blocked casts — triggering unstuck')
+                        navigator.move_spell_fail_count = 0
+                        unstuck(local_player)
+                    else
+                        local pre_cast_pos = cur_node
+                        local success = cast_spell.position(movement_spell_id, spell_node, 0)
+                        console.print('[move_spell] cast_spell.position -> ' .. tostring(success))
+                        if success then
+                            utils.log(2, 'movement spell to ' .. utils.vec_to_string(spell_node))
+                            tracker.bench_count("move_spell_cast")
+                            if not navigator.paused then navigator.update() end
+                            player_pos = local_player:get_position()
+                            cur_node = utils.normalize_node(player_pos)
+                            -- Host-side position update can lag the dash/teleport by a tick
+                            -- or two. Without this, the next find_path runs from the pre-cast
+                            -- position and either returns a path that backtracks or fails
+                            -- outright. Overriding last_pos to the spell destination + a
+                            -- short replan cooldown keeps subsequent pathfinds anchored
+                            -- where we actually are.
+                            navigator.move_spell_pre_cast_pos = pre_cast_pos
+                            navigator.last_pos = utils.normalize_node(spell_node)
+                            navigator.pathfind_replan_cooldown = get_time_since_inject() + 0.3
+                            navigator.path = new_path
+                            local node_str = utils.vec_to_string(spell_node)
+                            navigator.blacklisted_spell_node[node_str] = spell_node
+                        end
                     end
                 end
             end

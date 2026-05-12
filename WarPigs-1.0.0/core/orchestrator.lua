@@ -217,11 +217,27 @@ end
 -- MOVING_TO_CHEST → OPENING_CHEST → WAITING_FOR_VFX → WAITING_FOR_LOOT →
 -- (next chest) cycle. When that returns true we refuse to (a) start the
 -- via-Temis preamble and (b) re-fire the TO_TEMIS retry teleport.
-local function horde_in_chest_opening()
+-- Returns a string tag if HordeDev is in a state that must block teleports,
+-- or false if there is no block. Single function covers two cases so only one
+-- upvalue slot is consumed by orchestrator.tick() (Lua 5.1 limit = 60).
+--   'opening_chests' — HordeDev is mid-chest interact (fragile channeled action)
+--   'has_aether'     — player still holds aether and is in BSK (must spend it)
+--   false            — no block
+-- The in_bsk_world() call lives here (not in tick()) to avoid consuming an
+-- extra upvalue slot in tick() for in_bsk_world itself.
+local function horde_teleport_block_reason()
     local p = _G.InfernalHordesPlugin
-    if not p or type(p.getState) ~= 'function' then return false end
-    local ok, state = pcall(p.getState)
-    return ok and state == 'OPENING_CHESTS'
+    if p and type(p.getState) == 'function' then
+        local ok, state = pcall(p.getState)
+        if ok and state == 'OPENING_CHESTS' then return 'opening_chests' end
+    end
+    -- Only flag aether when inside BSK. Outside BSK the count may be frozen
+    -- or stale after a failed/completed horde and must not block the preamble.
+    if in_bsk_world() and type(get_aether_count) == 'function' then
+        local ok, count = pcall(get_aether_count)
+        if ok and type(count) == 'number' and count > 0 then return 'has_aether' end
+    end
+    return false
 end
 
 -- Resume Alfred if paused, then fire trigger_tasks with the completion
@@ -1467,14 +1483,18 @@ function orchestrator.tick()
 
         local has_pending = next(pending_disable) ~= nil
         local watchdog_hold_active = reaper_altar_watchdog.hold_until > now
-        local horde_chesting = horde_in_chest_opening()
+        local horde_block    = horde_teleport_block_reason()
+        local horde_chesting = horde_block == 'opening_chests'
+        local horde_aether   = horde_block == 'has_aether'
         local ready = has_incoming and incoming_settled and alfred_done
             and not has_pending and not in_helltide_combat
-            and not watchdog_hold_active and not horde_chesting
+            and not watchdog_hold_active and not horde_block
         if not ready then
             local reason
             if not has_incoming then
                 reason = 'no incoming activity yet'
+            elseif horde_aether then
+                reason = 'player still holding aether — HordeDev must spend all aether before preamble'
             elseif horde_chesting then
                 reason = 'HordeDev is opening chests — chest interact is fragile, refusing to fire Temis preamble'
             elseif has_pending then
@@ -1564,7 +1584,7 @@ function orchestrator.tick()
                 log('via-Temis preamble: arrived in Temis, Alfred not loaded/enabled — proceeding to warplan teleport')
                 start_warplan_teleport(wants, now)
             end
-        elseif horde_in_chest_opening() then
+        elseif horde_teleport_block_reason() == 'opening_chests' then
             -- The Temis channel was broken (combat in BSK / chest interact
             -- yanked us back) and HordeDev is now mid-chest. Re-firing
             -- teleport_to_waypoint(Temis) here would cancel the chest interact

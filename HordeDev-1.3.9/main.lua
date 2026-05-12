@@ -27,6 +27,13 @@ local function render_pulse()
         local px, py, pz = player_position:x(), player_position:y(), player_position:z()
         local draw_pos = vec3:new(px, py - 2, pz + 3)
         graphics.text_3d("Current Task: " .. current_task.name, draw_pos, 14, color_white(255))
+        local aether_count = 0
+        if type(get_aether_count) == 'function' then
+            local ok, count = pcall(get_aether_count)
+            if ok and type(count) == 'number' then aether_count = count end
+        end
+        local aether_pos = vec3:new(px, py - 2, pz + 2)
+        graphics.text_3d("Aether: " .. tostring(aether_count), aether_pos, 14, color_white(255))
     end
 end
 
@@ -117,6 +124,17 @@ InfernalHordesPlugin = {
             if not in_exit_horde then
                 first_seen = nil
                 return false
+            end
+            -- Belt-and-braces: don't signal done while the player still holds
+            -- any aether. exit_horde.shouldExecute also gates on this, so
+            -- reaching "Exit Horde" task normally implies aether==0, but this
+            -- guard survives any future path that bypasses shouldExecute.
+            if type(get_aether_count) == 'function' then
+                local ok, count = pcall(get_aether_count)
+                if ok and type(count) == 'number' and count > 0 then
+                    first_seen = nil
+                    return false
+                end
             end
             first_seen = first_seen or get_time_since_inject()
             return (get_time_since_inject() - first_seen) >= CHESTS_DONE_HOLD_S

@@ -47,9 +47,18 @@ local exit_horde_task = {
     moved_to_center = false,
 
     shouldExecute = function()
+        local aether_ok = true
+        if type(get_aether_count) == 'function' then
+            local ok, count = pcall(get_aether_count)
+            if ok and type(count) == 'number' and count > 0 then
+                console.print(string.format("[exit_horde] holding — player still has %d aether", count))
+                aether_ok = false
+            end
+        end
         return utils.player_in_zone("S05_BSK_Prototype02")
             and utils.get_stash() ~= nil
             and tracker.finished_chest_looting
+            and aether_ok
     end,
 
     Execute = function(self)

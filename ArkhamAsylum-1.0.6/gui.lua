@@ -1,5 +1,5 @@
 local plugin_label = 'arkham_asylum'
-local plugin_version = '2.0.8'
+local plugin_version = '2.0.9'
 console.print("Lua Plugin - Arkham Asylum - Leoric - v" .. plugin_version)
 
 local gui = {}
@@ -39,16 +39,20 @@ gui.town_enum = {
     TEMIS = 0,
     CERRIGAR = 1,
 }
+-- pit_tower_pos stored as plain {x, y, z} triples. Do NOT call vec3:new() at
+-- module load: in QQT, gui.lua is sometimes loaded before vec3 is injected,
+-- which throws inside this table literal and leaves gui.town_data nil on the
+-- (now-cached) partial gui table. Consumers convert to vec3 at runtime.
 gui.town_data = {
     [0] = {
         zone_name        = 'Skov_Temis',
         waypoint_sno     = 0x1CE51E,
-        pit_tower_pos    = vec3:new(2572.708984375, -498.4921875, 30.5166015625),
+        pit_tower_pos    = { 2572.708984375, -498.4921875, 30.5166015625 },
     },
     [1] = {
         zone_name        = 'Scos_Cerrigar',
         waypoint_sno     = 0x76D58,
-        pit_tower_pos    = vec3:new(-1659.1735839844, -613.06573486328, 37.2822265625),
+        pit_tower_pos    = { -1659.1735839844, -613.06573486328, 37.2822265625 },
     },
 }
 
@@ -89,6 +93,7 @@ gui.elements = {
     manage_orbwalker = create_checkbox(false, 'manage_orbwalker'),
     use_long_path = create_checkbox(false, 'use_long_path'),
     speed_mode = create_checkbox(false, 'speed_mode'),
+    speed_mode_2 = create_checkbox(false, 'speed_mode_2'),
     push_mode = create_checkbox(false, 'push_mode'),
     push_threshold = slider_int:new(3, 30, 10, get_hash(plugin_label .. '_' .. 'push_threshold')),
     push_champion_weight = slider_int:new(1, 10, 3, get_hash(plugin_label .. '_' .. 'push_champion_weight')),
@@ -135,7 +140,8 @@ gui.render = function ()
         gui.elements.chase_goblin:render('Chase goblin', 'Prioritize chasing treasure goblins over normal enemies. On by default.')
         gui.elements.pickup_heart_of_stone:render('Pickup Heart of Stone', 'Detour to and pick up Choron\'s Burden (Heart of Stone) carryables anywhere in the pit. On by default.')
         gui.elements.use_burden_altar:render('Use Burden Altar', 'After the boss dies, walk to the Choron\'s Burden Receptacle and interact for an extra glyph upgrade chance. Runs before glyph upgrade and Choron\'s Soul. On by default.')
-        gui.elements.speed_mode:render('Speed Mode (beta test)', 'Never stop for monsters — path through dense packs and let AltClick + evade explosions handle kills')
+        gui.elements.speed_mode:render('Speed Mode (beta test)', 'Never stop for normal monsters — pack-charge through-points, suppress shrine detours, stop only for elites/champions/goblins')
+        gui.elements.speed_mode_2:render('Speed Mode 2 (experimental)', 'Same as normal mode (shrines, exploration, push all still work) — only difference: skip plain trash, engage only elites/champions/goblins')
         gui.elements.push_mode:render('Push Mode (beta test)', 'Aggro small groups and pull them together before engaging — maximizes AoE value')
         if gui.elements.push_mode:get() then
             gui.elements.push_threshold:render('Group threshold', 'Weighted group size required before engaging (normal=1, champions/elites/bosses use weights below)')

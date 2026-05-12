@@ -256,6 +256,21 @@ task.shouldExecute = function()
         return false
     end
 
+    -- Goblin lock: if chase_goblin is on and a goblin is anywhere in the scan
+    -- range, defer to kill_monster so it can lock on. Goblins run — we can't
+    -- afford to be mid-pull when one is visible.
+    if settings.chase_goblin then
+        local scan = get_enemies_in_range(player_pos, 50)
+        for _, e in ipairs(scan) do
+            local skin = e:get_skin_name()
+            if skin and string.find(skin, "Goblin") then
+                pull_target = nil
+                actively_pulling = false
+                return false
+            end
+        end
+    end
+
     -- Actively pulling: always continue
     if actively_pulling then return true end
 

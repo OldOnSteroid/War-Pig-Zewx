@@ -1,15 +1,31 @@
 local gui = require 'gui'
 
+-- Defaults mirror gui.town_data[0] (Temis). pit_tower_pos held as a plain
+-- {x, y, z} triple so this module can load even if vec3 isn't injected yet
+-- (gui.lua used to vec3:new() at module load and crash silently inside its
+-- table literal, leaving the cached gui without town_data). vec3 is built
+-- on demand via to_vec3() at runtime when injection is guaranteed complete.
+local TOWN_DEFAULTS = {
+    zone_name     = 'Skov_Temis',
+    waypoint_sno  = 0x1CE51E,
+    pit_tower_pos = { 2572.708984375, -498.4921875, 30.5166015625 },
+}
+
+local function to_vec3 (xyz)
+    if not xyz then return nil end
+    if xyz.x ~= nil then return xyz end -- already a vec3
+    return vec3:new(xyz[1], xyz[2], xyz[3])
+end
+
 local settings = {
     plugin_label = gui.plugin_label,
     plugin_version = gui.plugin_version,
     enabled = false,
-    -- Resolved from gui.town selection in update_settings(). Defaults match
-    -- gui.town_data[0] (Temis) so first-frame reads are valid before the GUI
-    -- pulse runs.
-    town_zone = gui.town_data[0].zone_name,
-    town_waypoint = gui.town_data[0].waypoint_sno,
-    town_pit_tower_pos = gui.town_data[0].pit_tower_pos,
+    town_zone = TOWN_DEFAULTS.zone_name,
+    town_waypoint = TOWN_DEFAULTS.waypoint_sno,
+    -- Resolved to a vec3 in update_settings(); kept nil until the first pulse
+    -- so module load doesn't depend on vec3 being injected.
+    town_pit_tower_pos = nil,
     pit_level = 1,
     reset_timeout = 600,
     exit_mode = 0,
@@ -37,6 +53,7 @@ local settings = {
     manage_orbwalker = false,
     use_long_path = false,
     speed_mode = false,
+    speed_mode_2 = false,
     push_mode = false,
     push_threshold = 10,
     push_champion_weight = 3,
@@ -65,10 +82,13 @@ end
 settings.update_settings = function ()
     settings.enabled = gui.elements.main_toggle:get()
     local town_idx = gui.elements.town:get()
-    local town_data = gui.town_data[town_idx] or gui.town_data[0]
+    -- gui.town_data may be nil if gui.lua somehow loaded partially; fall back
+    -- to the hardcoded Temis defaults so we don't crash mid-pulse.
+    local town_table = gui.town_data
+    local town_data = (town_table and (town_table[town_idx] or town_table[0])) or TOWN_DEFAULTS
     settings.town_zone = town_data.zone_name
     settings.town_waypoint = town_data.waypoint_sno
-    settings.town_pit_tower_pos = town_data.pit_tower_pos
+    settings.town_pit_tower_pos = to_vec3(town_data.pit_tower_pos)
     settings.return_for_loot = gui.elements.return_for_loot:get()
     settings.pit_level = gui.elements.pit_level:get()
     settings.reset_timeout = gui.elements.reset_timeout:get()
@@ -95,6 +115,7 @@ settings.update_settings = function ()
     settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
     settings.use_long_path = gui.elements.use_long_path:get()
     settings.speed_mode = gui.elements.speed_mode:get()
+    settings.speed_mode_2 = gui.elements.speed_mode_2:get()
     settings.push_mode = gui.elements.push_mode:get()
     settings.push_threshold = gui.elements.push_threshold:get()
     settings.push_champion_weight = gui.elements.push_champion_weight:get()

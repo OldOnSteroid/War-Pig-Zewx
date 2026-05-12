@@ -31,11 +31,12 @@ end
 utils.get_entrance_portal = function ()
     local actors = actors_manager:get_all_actors()
     for _, actor in pairs(actors) do
-        if actor:is_interactable() then
-            local actor_name = actor:get_skin_name()
-            if actor_name == 'Portal_Dungeon_Undercity' then
-                return actor
-            end
+        -- Skip is_interactable() — calling it on every actor in the world
+        -- during the post-Accept zone transition crashes the game on stale
+        -- actor objects. Skin name is unique enough to identify the portal.
+        local actor_name = actor:get_skin_name()
+        if actor_name == 'Portal_Dungeon_Undercity' then
+            return actor
         end
     end
     return nil

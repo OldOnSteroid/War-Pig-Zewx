@@ -127,7 +127,7 @@ local search_helltide_task = {
                 idle_teleport_fired_time = nil
             end
             return
-        elseif utils.is_in_helltide() then
+        elseif utils.is_in_helltide() and not zone_overrides.is_excluded_zone() then
             -- Confirm and cache the zone (replacing any stale cached zone if
             -- the trap-recovery flag was set, since we're now in a *different*
             -- zone than the one we abandoned).

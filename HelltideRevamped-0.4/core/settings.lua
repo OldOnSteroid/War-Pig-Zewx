@@ -17,11 +17,13 @@ local settings = {
     event = true,
     prioritize_traversals = false,
     kill_monsters = true,
+    kill_monsters_rarity = 0, -- 0=All, 1=Rare+ (elite), 2=Champion+, 3=Boss only
     experimental_explorer = false,
     farm_cinder_threshold = 0,
     do_maiden = false,
     maiden_disable_cinders = 0,
     manage_orbwalker = false,
+    draw_chest_status = false,
 }
 
 function settings:update_settings()
@@ -41,11 +43,13 @@ function settings:update_settings()
     settings.chaos_rift = gui.elements.chaos_rift_toggle:get()
     settings.prioritize_traversals = gui.elements.prioritize_traversals_toggle:get()
     settings.kill_monsters = gui.elements.kill_monsters_toggle:get()
+    settings.kill_monsters_rarity = gui.elements.kill_monsters_rarity:get()
     settings.experimental_explorer = gui.elements.experimental_explorer_toggle:get()
     settings.farm_cinder_threshold = gui.elements.farm_cinder_threshold:get()
     settings.do_maiden = gui.elements.do_maiden_toggle:get()
     settings.maiden_disable_cinders = gui.elements.maiden_disable_cinders:get()
     settings.manage_orbwalker = gui.elements.manage_orbwalker:get()
+    settings.draw_chest_status = gui.elements.draw_chest_status:get()
 end
 
 -- Above this cinder count, force orbwalker clear OFF so the bot stops lingering

@@ -67,28 +67,33 @@ local get_closest_enemies = function ()
         if enemy:is_boss() then goto continue end
         local health = enemy:get_current_health()
         local dist = utils.distance(player_pos, enemy)
-        if health > 1 and dist <= effective_distance then
-            if closest_enemy_dist == nil or dist < closest_enemy_dist then
-                closest_enemy = enemy
-                closest_enemy_dist = dist
-            end
-            if enemy:is_elite() and
-                (closest_elite_dist == nil or dist < closest_elite_dist)
-            then
-                closest_elite = enemy
-                closest_elite_dist = dist
-            end
-            if enemy:is_champion() and
-                (closest_champ_dist == nil or dist < closest_champ_dist)
-            then
-                closest_champ = enemy
-                closest_champ_dist = dist
-            end
+        if health > 1 then
+            -- Goblins lock at the full scan range when chase_goblin is on.
+            -- They run away, so the normal effective_distance gate (~12) lets
+            -- them escape — we want to commit the moment one is visible.
             if settings.chase_goblin and skin and string.find(skin, "Goblin") and
                 (closest_goblin_dist == nil or dist < closest_goblin_dist)
             then
                 closest_goblin = enemy
                 closest_goblin_dist = dist
+            end
+            if dist <= effective_distance then
+                if closest_enemy_dist == nil or dist < closest_enemy_dist then
+                    closest_enemy = enemy
+                    closest_enemy_dist = dist
+                end
+                if enemy:is_elite() and
+                    (closest_elite_dist == nil or dist < closest_elite_dist)
+                then
+                    closest_elite = enemy
+                    closest_elite_dist = dist
+                end
+                if enemy:is_champion() and
+                    (closest_champ_dist == nil or dist < closest_champ_dist)
+                then
+                    closest_champ = enemy
+                    closest_champ_dist = dist
+                end
             end
         end
         ::continue::
@@ -109,10 +114,10 @@ task.shouldExecute = function ()
     if tracker.boss_dead then return false end
     if not utils.player_in_pit() then return false end
     local enemy, elite, champion, goblin = get_closest_enemies()
-    -- Speed mode skips trash but still detours for goblins — they're rare and
-    -- worth the brief stop. Without this, chase_goblin never fires in speed_mode.
-    if settings.speed_mode then
-        return goblin ~= nil
+    -- Speed modes (1 and 2) skip plain trash but still engage anything above normal
+    -- rarity (champions, elites, goblins). Regular mobs are left for AltClick/explosions.
+    if settings.speed_mode or settings.speed_mode_2 then
+        return elite ~= nil or champion ~= nil or goblin ~= nil
     end
     return enemy ~= nil or elite ~= nil or champion ~= nil or goblin ~= nil
 end
