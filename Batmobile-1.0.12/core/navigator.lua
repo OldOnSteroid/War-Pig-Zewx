@@ -332,7 +332,7 @@ local get_movement_spell_id = function(local_player)
         console.print('[move_spell] skip: navigator.disable_spell=true')
         return
     end
-    if navigator.spell_time + navigator.spell_timeout > get_time_since_inject() then
+    if navigator.spell_time + settings.spell_interval > get_time_since_inject() then
         return
     end
     navigator.spell_time = get_time_since_inject()

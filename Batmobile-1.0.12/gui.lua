@@ -65,6 +65,7 @@ gui.elements = {
     use_demonic_slash = create_checkbox(true, "use_demonic_slash"),
     demonic_slash_los = create_checkbox(true, "demonic_slash_los"),
     min_spell_dist = slider_float:new(1.0, 20.0, 3.0, get_hash(plugin_label .. '_min_spell_dist')),
+    spell_interval = slider_float:new(0.1, 10.0, 0.15, get_hash(plugin_label .. '_spell_interval')),
     prefer_long_paths = create_checkbox(false, "prefer_long_paths"),
     long_path_threshold = slider_float:new(10.0, 50.0, 20.0, get_hash(plugin_label .. '_long_path_threshold')),
     require_full_path_explore = create_checkbox(false, "require_full_path_explore"),
@@ -346,6 +347,10 @@ function gui.render()
         'spell will target that node. Raise to stop the bot from burning movement\n' ..
         'cooldowns on tiny hops; lower to let it cast more aggressively on short paths.\n' ..
         'Default 3.0.', 1)
+    gui.elements.spell_interval:render('Spell cast interval (s)',
+        'Minimum seconds between movement spell casts.\n' ..
+        'Raise to slow down spell usage; lower for faster casting.\n' ..
+        'Default 0.15.', 2)
     gui.elements.prefer_long_paths:render('Prefer long paths (experimental)',
         'Bias the explorer toward distant targets so each computed path is at least\n' ..
         'the threshold below in length. Gives movement spells a node ~N units out\n' ..
